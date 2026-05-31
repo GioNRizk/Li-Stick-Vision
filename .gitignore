@@ -1,0 +1,21 @@
+# Model weights (large binary — download automatically on first run)
+*.pt
+*.pth
+
+# Runtime output
+detection_output.json
+detection_log.jsonl
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
