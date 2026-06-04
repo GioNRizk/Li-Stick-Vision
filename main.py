@@ -1,11 +1,11 @@
 import json
-import sys
 import time
 from pathlib import Path
 
 import cv2
 
 import config
+from camera_source import CameraOpenError, open_camera
 from decision_engine import DecisionEngine, GuidanceDecision
 from detector import ObstacleDetector
 from uart_bridge import UartBridge
@@ -45,18 +45,6 @@ def _distance_label(score: float) -> str:
     if score >= config.THRESHOLD_APPROACHING:
         return "~3-5 m"
     return ">5 m"
-
-
-def open_camera():
-    # Raspberry Pi camera-specific code can start here if this MVP later swaps
-    # OpenCV VideoCapture for Picamera2/libcamera. PC testing stays on OpenCV.
-    cap = cv2.VideoCapture(config.CAMERA_ID)
-    if not cap.isOpened():
-        print(f"[ERROR] Cannot open camera (id={config.CAMERA_ID}).")
-        sys.exit(1)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, config.FRAME_WIDTH)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, config.FRAME_HEIGHT)
-    return cap
 
 
 def _print_status_change(result: dict, decision: GuidanceDecision):
@@ -179,7 +167,11 @@ def main():
     print(f"  UART : {'on' if config.ENABLE_UART else 'off'}")
     print("  Press 'q' in the camera window to quit.\n")
 
-    cap = open_camera()
+    try:
+        cap = open_camera()
+    except CameraOpenError as exc:
+        print(f"[ERROR] {exc}")
+        return
     detector = ObstacleDetector()
     decision_engine = DecisionEngine()
     voice = VoiceManager(enabled=config.ENABLE_VOICE)

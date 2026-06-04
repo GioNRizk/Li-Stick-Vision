@@ -95,13 +95,21 @@ Recommended settings in `config.py`:
 
 ```python
 SHOW_WINDOW = False
+CAMERA_BACKEND = "auto"
 ENABLE_VOICE = True
 ENABLE_UART = True
 UART_PORT = "/dev/serial0"
 ```
 
-Raspberry Pi hardware-specific UART code starts in `uart_bridge.py`. Keep
-`ENABLE_UART = False` for normal PC testing unless an ESP32 is connected.
+For Raspberry Pi Camera Module v2 IMX219, `CAMERA_BACKEND = "auto"` will try
+Picamera2 first on Raspberry Pi and fall back to OpenCV if Picamera2 is not
+available. Use `CAMERA_BACKEND = "opencv"` for laptop/USB webcam testing.
+Picamera2 is provided by Raspberry Pi OS packages on the Pi; it is intentionally
+not required for Windows laptop testing.
+
+Raspberry Pi hardware-specific camera code starts in `camera_source.py`, and
+UART code starts in `uart_bridge.py`. Keep `ENABLE_UART = False` for normal PC
+testing unless an ESP32 is connected.
 
 ## Configuration
 
@@ -110,6 +118,8 @@ Key settings live in `config.py`:
 | Setting | Default | Description |
 |---|---:|---|
 | `CAMERA_ID` | `0` | Camera index |
+| `CAMERA_BACKEND` | `"auto"` | `auto`, `opencv`, or `picamera2` |
+| `PICAMERA2_FORMAT` | `"BGR888"` | Picamera2 frame format for detector compatibility |
 | `YOLO_CONFIDENCE` | `0.50` | Minimum YOLO confidence |
 | `SHOW_WINDOW` | `True` | Disable for headless Pi |
 | `ENABLE_VOICE` | `True` | Offline TTS guidance |

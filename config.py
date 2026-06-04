@@ -2,6 +2,8 @@
 CAMERA_ID    = 0        # 0 = first USB/Pi camera
 FRAME_WIDTH  = 640
 FRAME_HEIGHT = 480
+CAMERA_BACKEND = "auto"          # auto, opencv, picamera2
+PICAMERA2_FORMAT = "BGR888"      # BGR888 feeds detector/display without conversion
 
 # ── Model ─────────────────────────────────────────────────────────────────────
 YOLO_MODEL      = "yolov8n.pt"   # nano — fastest on Pi 4/5
