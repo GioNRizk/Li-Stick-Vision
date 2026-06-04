@@ -253,6 +253,8 @@ class ObstacleDetector:
         result_dict = {
             "timestamp":       datetime.now().isoformat(),
             "frame_id":        self.frame_id,
+            "frame_width":     w,
+            "frame_height":    h,
             "risk_level":      risk,
             "smooth_proximity": smooth_prox,
             "trend":           trend if obstacles else "stable",

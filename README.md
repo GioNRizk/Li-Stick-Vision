@@ -1,150 +1,148 @@
 # Li-Stick Vision
 
-A real-time obstacle detection system for visually impaired people, designed to run on a **Raspberry Pi 4/5** (or any PC for testing). Uses a camera to detect obstacles and warns the user with a buzzer — just like a car parking sensor.
+Li-Stick Vision is a Raspberry Pi 5 MVP guidance module for visually impaired
+navigation. It still runs on a PC for camera testing, but the main loop is now
+structured for the final hardware split:
 
----
+```
+Camera -> Detector -> Decision Engine -> Voice Manager -> optional ESP32 UART
+```
 
-## How it works
+## What It Does
 
-- Detects people, chairs, tables, furniture, and other indoor obstacles using **YOLOv8**
-- Detects walls and plain surfaces using **optical flow** (even featureless painted walls)
-- Gives audio feedback through a buzzer (or PC speaker on Windows) with increasing urgency as obstacles get closer
-- 5 alert zones: **SAFE → APPROACHING → WARNING → ALERT → DANGER**
+- Detects useful mobility obstacles with YOLOv8.
+- Keeps optical-flow wall/surface detection for plain walls and large surfaces.
+- Converts detections into short navigation commands instead of speaking every
+  object.
+- Uses offline text-to-speech instead of the old buzzer loop.
+- Optionally exchanges status with an ESP32 over UART.
+- Keeps JSON snapshot output available, but disabled by default.
 
----
+## Guidance Commands
 
-## Hardware required
+The decision engine uses left, center, and right zones:
 
-| Part | Details |
+| Situation | Spoken guidance |
 |---|---|
-| Raspberry Pi 4 or 5 | Any RAM size works; 4 GB recommended |
-| Camera | Pi Camera Module or any USB webcam |
-| Buzzer | Active buzzer wired to GPIO pin 18 (BCM) |
-| Power bank | To make it portable |
+| Obstacle left | Move slightly right |
+| Obstacle right | Move slightly left |
+| Dangerous center obstacle | Stop |
+| Person center | Person ahead |
+| Wall/surface center | Wall ahead |
+| Upper-center object | Head obstacle |
+| Multiple close people | Crowded area |
+| Safe path | Silence |
 
-> **Testing on Windows/Mac/Linux PC**: works without a buzzer — uses the PC speaker instead. No Raspberry Pi needed to test.
+Priority order:
 
----
+1. `FALL_DETECTED`
+2. `SOS_SENT`
+3. `HEAD_OBSTACLE`
+4. `STOP` / `CENTER_DANGER`
+5. `MOVE_LEFT` / `MOVE_RIGHT`
+6. `OBJECT_AHEAD`
+7. `SAFE` / silence
+
+ESP32 events such as `BATTERY_LOW`, `GPS_WEAK`, `WIFI_LOST`, and
+`WIFI_CONNECTED` are supported as lower-priority status messages.
+
+## Hardware Responsibilities
+
+Future Raspberry Pi responsibilities:
+
+- AI vision
+- Text-to-speech
+- Camera processing
+- Decision engine
+- UART communication
+
+Future ESP32 responsibilities:
+
+- SOS button
+- Fall detection
+- Ultrasonic sensors
+- Vibration motors
+- GPS acquisition
+- Heartbeat and connectivity
+
+Both sides are designed to keep working independently if the other module is
+temporarily unavailable.
 
 ## Installation
 
-### 1. Clone the repository
-
-```bash
-git clone https://github.com/GioNRizk/Li-Stick-Vision.git
-cd Li-Stick-Vision
-```
-
-### 2. Install Python dependencies
-
-Requires **Python 3.10 or newer**.
+Requires Python 3.10 or newer.
 
 ```bash
 pip install -r requirements.txt
 ```
 
-This installs:
-- `ultralytics` — YOLOv8 object detection
-- `opencv-python` — camera capture and image processing
-- `torch` + `torchvision` — deep learning backend
-- `numpy` — array math
-- `timm` — model utilities
+On first run, YOLOv8 may download `yolov8n.pt` if it is not already present.
 
-> **On Raspberry Pi**, use `pip3` and make sure you have at least 2 GB free disk space for the model weights.
-
-### 3. First run — automatic model download
-
-On the first run, YOLOv8 will automatically download `yolov8n.pt` (~6 MB). This only happens once.
-
----
-
-## Running
+## Running On PC
 
 ```bash
 python main.py
 ```
 
-A camera window will open showing live detections. Press **`q`** to quit.
+A camera window opens for testing. Press `q` to quit.
 
-> On Raspberry Pi headless (no monitor): set `SHOW_WINDOW = False` in `config.py` before running.
+If offline TTS is unavailable on the PC, detection and console guidance continue
+without crashing.
 
----
+## Running On Raspberry Pi 5
 
-## Configuration (`config.py`)
+Recommended settings in `config.py`:
 
-All settings are in `config.py`. The most useful ones:
+```python
+SHOW_WINDOW = False
+ENABLE_VOICE = True
+ENABLE_UART = True
+UART_PORT = "/dev/serial0"
+```
+
+Raspberry Pi hardware-specific UART code starts in `uart_bridge.py`. Keep
+`ENABLE_UART = False` for normal PC testing unless an ESP32 is connected.
+
+## Configuration
+
+Key settings live in `config.py`:
 
 | Setting | Default | Description |
-|---|---|---|
-| `CAMERA_ID` | `0` | Camera index — try `1` if your webcam isn't detected |
-| `YOLO_CONFIDENCE` | `0.50` | Minimum detection confidence (0–1). Lower = more sensitive but more false positives |
-| `SHOW_WINDOW` | `True` | Set to `False` on headless Raspberry Pi (no monitor) |
-| `BUZZER_PIN` | `18` | BCM GPIO pin for the buzzer (Raspberry Pi only) |
-| `PROXIMITY_EMA_ALPHA` | `0.25` | Smoothing factor — lower = smoother but slower to react |
+|---|---:|---|
+| `CAMERA_ID` | `0` | Camera index |
+| `YOLO_CONFIDENCE` | `0.50` | Minimum YOLO confidence |
+| `SHOW_WINDOW` | `True` | Disable for headless Pi |
+| `ENABLE_VOICE` | `True` | Offline TTS guidance |
+| `ENABLE_UART` | `False` | Optional ESP32 serial bridge |
+| `ENABLE_DEBUG_LOGGING` | `False` | JSONL debug logging |
+| `LOG_ON_RISK_CHANGE_ONLY` | `True` | Log only risk/command changes |
+| `VOICE_COOLDOWN_SECONDS` | `2.5` | Suppress repeated AI phrases |
+| `EMERGENCY_COOLDOWN_SECONDS` | `1.0` | Suppress repeated emergency phrases |
+| `TTS_BACKEND` | `"auto"` | Offline TTS backend selection |
+| `TTS_TIMEOUT_SECONDS` | `5.0` | Prevent one TTS call from blocking repeats |
+| `ENABLE_DETECTION_OUTPUT_JSON` | `False` | Preserve old detection_output.json behavior |
 
-### Alert thresholds
+## Detected Classes
 
-| Zone | Threshold | Estimated distance | Buzzer |
-|---|---|---|---|
-| APPROACHING | > 0.13 | ~4 m | Soft ping every 2.5 s |
-| WARNING | > 0.33 | ~2.5 m | Beep every 0.8 s |
-| ALERT | > 0.58 | ~1.5 m | Fast beep every 0.35 s |
-| DANGER | > 0.80 | < 1 m | Rapid beep every 0.18 s |
+YOLO is limited to mobility-relevant obstacles:
 
----
+`person`, `chair`, `bench`, `couch`, `dining table`, `bed`, `potted plant`,
+`backpack`, `suitcase`, `umbrella`, `dog`, `cat`, `bicycle`, `motorcycle`,
+`car`, `bus`, `truck`
 
-## Raspberry Pi — buzzer wiring
+Ignored classes include `book`, `bottle`, `laptop`, `tv`, `vase`, `toilet`, and
+`refrigerator`. Wall/surface detection remains separate and does not use a YOLO
+class label.
 
-```
-Raspberry Pi GPIO 18 (BCM)  →  Buzzer positive (+)
-Raspberry Pi GND            →  Buzzer negative (-)
-```
-
-The system auto-detects whether it's running on a Pi (uses GPIO PWM) or a PC (uses the sound card). No code change needed.
-
----
-
-## Enabling the depth model (more accurate distances)
-
-The system works without it, but enabling **MiDaS** gives better real-world distance estimates, especially for walls.
-
-1. Set `USE_DEPTH_MODEL = True` in `config.py`
-2. On first run it downloads ~82 MB of model weights
-3. Requires a stable internet connection for the download
-
----
-
-## Detected obstacle classes
-
-The system detects 20 indoor/pedestrian obstacle types:
-
-`person` · `bench` · `chair` · `couch` · `bed` · `dining table` · `toilet` · `refrigerator` · `potted plant` · `vase` · `tv` · `laptop` · `book` · `bottle` · `backpack` · `suitcase` · `handbag` · `umbrella` · `cat` · `dog`
-
-Walls and plain surfaces are detected separately using optical flow (no class label needed).
-
----
-
-## Project structure
+## Project Structure
 
 ```
 Li-Stick-Vision/
-├── main.py          # Main loop: camera → detect → buzzer → display
-├── detector.py      # YOLOv8 + wall detector + proximity scoring
-├── alerter.py       # Buzzer sound logic (GPIO on Pi, winsound on Windows)
-├── config.py        # All settings in one place
-└── requirements.txt # Python dependencies
-```
-
----
-
-## Requirements summary
-
-```
-Python >= 3.10
-pip install -r requirements.txt
-```
-
-For Raspberry Pi GPIO buzzer:
-```
-pip install RPi.GPIO
+├── main.py              # Clean orchestration loop
+├── detector.py          # YOLOv8 + wall/surface detection
+├── decision_engine.py   # Converts detections into guidance commands
+├── voice_manager.py     # Offline non-blocking TTS with cooldowns
+├── uart_bridge.py       # Optional ESP32 UART bridge
+├── config.py            # Settings and feature flags
+└── requirements.txt
 ```
