@@ -9,14 +9,33 @@ from decision_engine import GuidanceDecision, PRIORITY
 
 
 ESP32_MESSAGES = {
-    "FALL_DETECTED": ("Fall detected", PRIORITY["FALL_DETECTED"]),
-    "SOS_SENT": ("SOS sent", PRIORITY["SOS_SENT"]),
-    "GPS_WEAK": ("GPS weak", PRIORITY["GPS_WEAK"]),
-    "BATTERY_LOW": ("Battery low", PRIORITY["BATTERY_LOW"]),
-    "WIFI_LOST": ("WiFi lost", PRIORITY["WIFI_LOST"]),
-    "WIFI_CONNECTED": ("WiFi connected", PRIORITY["WIFI_CONNECTED"]),
-}
+    "CANE_ON": ("Cane is on", PRIORITY["CANE_ON"]),
 
+    "SOS_HOLD_STARTED": ("Hold to send emergency alert", PRIORITY["SOS_SENT"]),
+    "SOS_SENT": ("Emergency alert sent", PRIORITY["SOS_SENT"]),
+    "SOS_CANCELLED": ("Emergency alert cancelled", PRIORITY["MODE_CHANGE"]),
+
+    "FALL_DETECTED": ("Fall detected", PRIORITY["FALL_DETECTED"]),
+
+    "HEAD_SENSOR_ALERT": ("Head obstacle", PRIORITY["HEAD_OBSTACLE"]),
+
+    "SILENT_MODE_ON": ("Silent mode on", PRIORITY["MODE_CHANGE"]),
+    "SILENT_MODE_OFF": ("Silent mode off", PRIORITY["MODE_CHANGE"]),
+
+    "FULL_PAUSE_ON": ("Cane paused", PRIORITY["MODE_CHANGE"]),
+    "FULL_PAUSE_OFF": ("Cane resumed", PRIORITY["MODE_CHANGE"]),
+
+    "AI_PAUSE_ON": ("AI guidance paused", PRIORITY["MODE_CHANGE"]),
+    "AI_PAUSE_OFF": ("AI guidance resumed", PRIORITY["MODE_CHANGE"]),
+
+    "GPS_WEAK": ("GPS unavailable", PRIORITY["GPS_WEAK"]),
+    "GPS_AVAILABLE": ("GPS available", PRIORITY["GPS_AVAILABLE"]),
+
+    "WIFI_LOST": ("Connection lost", PRIORITY["WIFI_LOST"]),
+    "WIFI_CONNECTED": ("Connection restored", PRIORITY["WIFI_CONNECTED"]),
+
+    "BATTERY_LOW": ("Battery low", PRIORITY["BATTERY_LOW"]),
+}
 
 class UartBridge:
     """

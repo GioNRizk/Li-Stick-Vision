@@ -64,7 +64,7 @@ TTS_TIMEOUT_SECONDS = 5.0        # allows backend startup while keeping worker s
 # Raspberry Pi hardware-specific code starts at uart_bridge.py. Keep UART off
 # for PC testing unless an ESP32 is connected.
 ENABLE_UART = False
-UART_PORT = "/dev/serial0"        # Raspberry Pi UART; use "COM3" etc. on Windows
+UART_PORT = "/dev/ttyAMA0"       # Raspberry Pi UART; use "COM3" etc. on Windows
 UART_BAUDRATE = 115200
 UART_SEND_AI_DECISIONS = True
 UART_SEND_INTERVAL_SECONDS = 1.0

@@ -32,10 +32,20 @@ MOBILITY_OBSTACLE_LABELS = {
 # Higher number means higher speech priority.
 PRIORITY = {
     "SAFE": 0,
-    "WIFI_CONNECTED": 5,
-    "GPS_WEAK": 15,
-    "WIFI_LOST": 15,
-    "BATTERY_LOW": 25,
+
+    # Info/status messages
+    "INFO": 10,
+    "WIFI_CONNECTED": 10,
+    "GPS_AVAILABLE": 10,
+    "CANE_ON": 10,
+    "MODE_CHANGE": 20,
+
+    # Warnings
+    "GPS_WEAK": 25,
+    "WIFI_LOST": 25,
+    "BATTERY_LOW": 35,
+
+    # AI navigation
     "OBJECT_AHEAD": 30,
     "PERSON_AHEAD": 30,
     "WALL_AHEAD": 30,
@@ -45,6 +55,8 @@ PRIORITY = {
     "STOP": 60,
     "CENTER_DANGER": 60,
     "HEAD_OBSTACLE": 75,
+
+    # Emergencies
     "SOS_SENT": 90,
     "FALL_DETECTED": 100,
 }
