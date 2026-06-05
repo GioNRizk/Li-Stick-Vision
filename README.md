@@ -37,14 +37,39 @@ Priority order:
 
 1. `FALL_DETECTED`
 2. `SOS_SENT`
-3. `HEAD_OBSTACLE`
-4. `STOP` / `CENTER_DANGER`
-5. `MOVE_LEFT` / `MOVE_RIGHT`
-6. `OBJECT_AHEAD`
-7. `SAFE` / silence
+3. `HEAD_SENSOR_ALERT`
+4. `BATTERY_LOW`
+5. Runtime mode changes
+6. `HEAD_OBSTACLE`
+7. `STOP` / `CENTER_DANGER`
+8. `MOVE_LEFT` / `MOVE_RIGHT`
+9. `OBJECT_AHEAD`
+10. `SAFE` / silence
 
-ESP32 events such as `BATTERY_LOW`, `GPS_WEAK`, `WIFI_LOST`, and
-`WIFI_CONNECTED` are supported as lower-priority status messages.
+ESP32 events such as `GPS_WEAK`, `GPS_AVAILABLE`, `WIFI_LOST`, and
+`WIFI_CONNECTED` are supported as status messages.
+
+## Runtime Modes
+
+ESP32 mode events control Raspberry Pi voice behavior at runtime:
+
+| ESP32 event | Pi speech | Behavior |
+|---|---|---|
+| `AI_PAUSE_ON` | AI guidance paused | Stops AI camera guidance speech |
+| `AI_PAUSE_OFF` | AI guidance resumed | Resumes AI camera guidance speech |
+| `SILENT_MODE_ON` | Silent mode on | Mutes normal AI navigation speech |
+| `SILENT_MODE_OFF` | Silent mode off | Allows AI speech if AI pause/full pause are off |
+| `FULL_PAUSE_ON` | Cane paused | Mutes normal AI navigation speech |
+| `FULL_PAUSE_OFF` | Cane resumed | Allows AI speech if AI pause/silent mode are off |
+
+These safety ESP32 messages still speak during AI pause, silent mode, or full
+pause: `FALL_DETECTED`, `SOS_SENT`, `HEAD_SENSOR_ALERT`, and `BATTERY_LOW`.
+
+You can test runtime state handling without hardware:
+
+```bash
+python test_runtime_events.py
+```
 
 ## Hardware Responsibilities
 
@@ -151,8 +176,11 @@ Li-Stick-Vision/
 ├── main.py              # Clean orchestration loop
 ├── detector.py          # YOLOv8 + wall/surface detection
 ├── decision_engine.py   # Converts detections into guidance commands
+├── runtime_state.py     # Runtime AI pause / silent / full pause state
 ├── voice_manager.py     # Offline non-blocking TTS with cooldowns
+├── camera_source.py     # OpenCV and Picamera2 camera backends
 ├── uart_bridge.py       # Optional ESP32 UART bridge
 ├── config.py            # Settings and feature flags
+├── test_runtime_events.py
 └── requirements.txt
 ```

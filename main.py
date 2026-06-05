@@ -8,6 +8,7 @@ import config
 from camera_source import CameraOpenError, open_camera
 from decision_engine import DecisionEngine, GuidanceDecision
 from detector import ObstacleDetector
+from runtime_state import RuntimeState
 from uart_bridge import UartBridge
 from voice_manager import VoiceManager
 
@@ -117,15 +118,30 @@ def _draw_overlay(frame, result: dict, decision: GuidanceDecision, fps: float):
     cv2.rectangle(frame, (8, 76), (bar_x2, 84), color, -1)
 
 
-def _choose_active_decision(
+def _choose_display_decision(
     ai_decision: GuidanceDecision,
     esp32_decisions: list[GuidanceDecision],
+    ai_guidance_allowed: bool,
 ) -> GuidanceDecision:
-    active = ai_decision
+    active = ai_decision if ai_guidance_allowed else _muted_decision(ai_decision)
     for decision in esp32_decisions:
         if decision.priority > active.priority:
             active = decision
     return active
+
+
+def _muted_decision(ai_decision: GuidanceDecision) -> GuidanceDecision:
+    return GuidanceDecision(
+        code="AI_MUTED",
+        message=None,
+        priority=0,
+        risk_level=ai_decision.risk_level,
+        source="runtime",
+        details={
+            "suppressed_ai_code": ai_decision.code,
+            "suppressed_ai_message": ai_decision.message,
+        },
+    )
 
 
 def _write_latest_json(path: Path, result: dict):
@@ -176,6 +192,7 @@ def main():
     decision_engine = DecisionEngine()
     voice = VoiceManager(enabled=config.ENABLE_VOICE)
     uart = UartBridge(enabled=config.ENABLE_UART)
+    runtime_state = RuntimeState()
 
     out_json = Path(config.OUTPUT_JSON)
     log_path = Path(config.OUTPUT_LOG)
@@ -189,6 +206,14 @@ def main():
         while True:
             t0 = time.perf_counter()
 
+            esp32_decisions = uart.read_pending()
+            allowed_esp32_decisions: list[GuidanceDecision] = []
+            for decision in esp32_decisions:
+                runtime_state.apply_esp32_decision(decision)
+                if runtime_state.allows_esp32_decision(decision):
+                    allowed_esp32_decisions.append(decision)
+                    voice.speak_decision(decision)
+
             ret, frame = cap.read()
             if not ret:
                 time.sleep(0.02)
@@ -196,18 +221,30 @@ def main():
 
             result, annotated = detector.detect(frame)
             ai_decision = decision_engine.decide(result)
-
-            esp32_decisions = uart.read_pending()
-            active_decision = _choose_active_decision(ai_decision, esp32_decisions)
+            ai_guidance_allowed = runtime_state.allows_ai_decision(ai_decision)
+            active_decision = _choose_display_decision(
+                ai_decision,
+                allowed_esp32_decisions,
+                ai_guidance_allowed,
+            )
 
             result["ai_decision"] = ai_decision.to_dict()
             result["active_decision"] = active_decision.to_dict()
+            result["runtime_state"] = runtime_state.mode_summary()
+            result["ai_guidance_suppressed"] = (
+                ai_decision.should_speak and not ai_guidance_allowed
+            )
             if esp32_decisions:
                 result["esp32_decisions"] = [
                     decision.to_dict() for decision in esp32_decisions
                 ]
+            if allowed_esp32_decisions:
+                result["allowed_esp32_decisions"] = [
+                    decision.to_dict() for decision in allowed_esp32_decisions
+                ]
 
-            voice.speak_decision(active_decision)
+            if ai_guidance_allowed:
+                voice.speak_decision(ai_decision)
             uart.send_ai_decision(ai_decision)
 
             dt = time.perf_counter() - t0

@@ -38,12 +38,10 @@ PRIORITY = {
     "WIFI_CONNECTED": 10,
     "GPS_AVAILABLE": 10,
     "CANE_ON": 10,
-    "MODE_CHANGE": 20,
 
     # Warnings
     "GPS_WEAK": 25,
     "WIFI_LOST": 25,
-    "BATTERY_LOW": 35,
 
     # AI navigation
     "OBJECT_AHEAD": 30,
@@ -56,12 +54,24 @@ PRIORITY = {
     "CENTER_DANGER": 60,
     "HEAD_OBSTACLE": 75,
 
+    # Runtime controls should interrupt normal AI guidance.
+    "MODE_CHANGE": 80,
+
+    # Safety/status messages that must cut through pause/silent modes
+    "BATTERY_LOW": 85,
+    "HEAD_SENSOR_ALERT": 88,
+
     # Emergencies
     "SOS_SENT": 90,
     "FALL_DETECTED": 100,
 }
 
-EMERGENCY_CODES = {"FALL_DETECTED", "SOS_SENT"}
+EMERGENCY_CODES = {
+    "FALL_DETECTED",
+    "SOS_SENT",
+    "HEAD_SENSOR_ALERT",
+    "BATTERY_LOW",
+}
 
 
 @dataclass(slots=True)

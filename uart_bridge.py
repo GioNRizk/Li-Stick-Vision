@@ -17,7 +17,7 @@ ESP32_MESSAGES = {
 
     "FALL_DETECTED": ("Fall detected", PRIORITY["FALL_DETECTED"]),
 
-    "HEAD_SENSOR_ALERT": ("Head obstacle", PRIORITY["HEAD_OBSTACLE"]),
+    "HEAD_SENSOR_ALERT": ("Head obstacle", PRIORITY["HEAD_SENSOR_ALERT"]),
 
     "SILENT_MODE_ON": ("Silent mode on", PRIORITY["MODE_CHANGE"]),
     "SILENT_MODE_OFF": ("Silent mode off", PRIORITY["MODE_CHANGE"]),
