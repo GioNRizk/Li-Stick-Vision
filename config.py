@@ -40,6 +40,9 @@ DEPTH_SKIP_FRAMES = 2
 #      WARNING     > 0.33  →  ~2.5 m  direction guidance     — approaching
 #      APPROACHING > 0.13  →  ~4 m    awareness guidance     — detected ahead
 #      SAFE        ≤ 0.13  →  >5 m    silent                 — all clear
+#
+# Final proximity thresholds must be calibrated after the 3D enclosure, camera
+# angle, and ultrasonic sensor mounting are fixed.
 # ──────────────────────────────────────────────────────────────────────────────
 THRESHOLD_DANGER      = 0.80
 THRESHOLD_ALERT       = 0.58

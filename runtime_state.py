@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 from decision_engine import GuidanceDecision
@@ -18,6 +19,9 @@ AI_NAVIGATION_CODES = {
     "PERSON_AHEAD",
     "OBJECT_AHEAD",
     "WALL_AHEAD",
+    "VEHICLE_NEARBY",
+    "STAIRS_AHEAD",
+    "POLE_AHEAD",
     "MOVE_LEFT",
     "MOVE_RIGHT",
     "STOP",
@@ -33,12 +37,22 @@ ALWAYS_SPEAK_ESP32_CODES = {
     "BATTERY_LOW",
 }
 
+SAFETY_EVENT_CODES = {
+    "FALL_DETECTED",
+    "SOS_SENT",
+    "HEAD_SENSOR_ALERT",
+    "BATTERY_LOW",
+}
+
 
 @dataclass
 class RuntimeState:
     ai_guidance_enabled: bool = True
     silent_mode_enabled: bool = False
     full_pause_enabled: bool = False
+    last_head_sensor_alert_time: float | None = None
+    last_esp32_event: str | None = None
+    last_safety_event_time: float | None = None
 
     def apply_esp32_decision(self, decision: GuidanceDecision) -> bool:
         """
@@ -49,6 +63,13 @@ class RuntimeState:
         the mode transition.
         """
         code = decision.code
+        now = time.monotonic()
+        self.last_esp32_event = code
+        if code in SAFETY_EVENT_CODES:
+            self.last_safety_event_time = now
+        if code == "HEAD_SENSOR_ALERT":
+            self.last_head_sensor_alert_time = now
+
         if code == "AI_PAUSE_ON":
             self.ai_guidance_enabled = False
             return True
@@ -88,9 +109,12 @@ class RuntimeState:
             return True
         return True
 
-    def mode_summary(self) -> dict[str, bool]:
+    def mode_summary(self) -> dict[str, bool | float | str | None]:
         return {
             "ai_guidance_enabled": self.ai_guidance_enabled,
             "silent_mode_enabled": self.silent_mode_enabled,
             "full_pause_enabled": self.full_pause_enabled,
+            "last_head_sensor_alert_time": self.last_head_sensor_alert_time,
+            "last_esp32_event": self.last_esp32_event,
+            "last_safety_event_time": self.last_safety_event_time,
         }

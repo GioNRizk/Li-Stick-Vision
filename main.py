@@ -6,7 +6,7 @@ import cv2
 
 import config
 from camera_source import CameraOpenError, open_camera
-from decision_engine import DecisionEngine, GuidanceDecision
+from decision_engine import DecisionEngine, GuidanceDecision, PRIORITY
 from detector import ObstacleDetector
 from runtime_state import RuntimeState
 from uart_bridge import UartBridge
@@ -144,6 +144,21 @@ def _muted_decision(ai_decision: GuidanceDecision) -> GuidanceDecision:
     )
 
 
+def _runtime_status_decision(
+    code: str,
+    message: str,
+    **details: str,
+) -> GuidanceDecision:
+    return GuidanceDecision(
+        code=code,
+        message=message,
+        priority=PRIORITY.get(code, PRIORITY["INFO"]),
+        risk_level="info",
+        source="runtime",
+        details=details,
+    )
+
+
 def _write_latest_json(path: Path, result: dict):
     if config.ENABLE_DETECTION_OUTPUT_JSON:
         path.write_text(json.dumps(result, indent=2), encoding="utf-8")
@@ -183,16 +198,62 @@ def main():
     print(f"  UART : {'on' if config.ENABLE_UART else 'off'}")
     print("  Press 'q' in the camera window to quit.\n")
 
+    voice = VoiceManager(enabled=config.ENABLE_VOICE)
+
     try:
         cap = open_camera()
     except CameraOpenError as exc:
         print(f"[ERROR] {exc}")
+        voice.speak_immediate(
+            _runtime_status_decision(
+                "AI_UNAVAILABLE",
+                "AI camera unavailable",
+                component="camera",
+                error=str(exc),
+            )
+        )
+        voice.stop()
         return
-    detector = ObstacleDetector()
+    except Exception as exc:
+        print(f"[ERROR] Camera unavailable: {exc}")
+        voice.speak_immediate(
+            _runtime_status_decision(
+                "AI_UNAVAILABLE",
+                "AI camera unavailable",
+                component="camera",
+                error=str(exc),
+            )
+        )
+        voice.stop()
+        return
+
+    try:
+        detector = ObstacleDetector()
+    except Exception as exc:
+        print(f"[ERROR] AI detector unavailable: {exc}")
+        voice.speak_immediate(
+            _runtime_status_decision(
+                "AI_UNAVAILABLE",
+                "AI guidance unavailable",
+                component="detector",
+                error=str(exc),
+            )
+        )
+        cap.release()
+        voice.stop()
+        return
+
     decision_engine = DecisionEngine()
-    voice = VoiceManager(enabled=config.ENABLE_VOICE)
     uart = UartBridge(enabled=config.ENABLE_UART)
     runtime_state = RuntimeState()
+
+    voice.speak_immediate(
+        _runtime_status_decision("AI_READY", "AI guidance ready")
+    )
+    if uart.is_connected:
+        voice.speak_immediate(
+            _runtime_status_decision("CANE_ON", "Cane connected")
+        )
 
     out_json = Path(config.OUTPUT_JSON)
     log_path = Path(config.OUTPUT_LOG)

@@ -7,6 +7,35 @@ from typing import Any
 import config
 
 
+VEHICLE_LABELS = {
+    "bicycle",
+    "motorcycle",
+    "car",
+    "bus",
+    "truck",
+}
+
+PET_LABELS = {
+    "dog",
+    "cat",
+}
+
+# YOLOv8 COCO does not include reliable stairs classes. Keep these labels wired
+# for a future custom detector, depth/segmentation model, or class-capable model.
+STAIRS_LABELS = {
+    "stairs",
+    "staircase",
+}
+
+# YOLOv8 COCO also does not provide a dependable pole/post class. These labels
+# are placeholders for future custom model support and external detectors.
+POLE_LABELS = {
+    "pole",
+    "traffic light pole",
+    "sign pole",
+    "post",
+}
+
 MOBILITY_OBSTACLE_LABELS = {
     "person",
     "chair",
@@ -18,15 +47,8 @@ MOBILITY_OBSTACLE_LABELS = {
     "backpack",
     "suitcase",
     "umbrella",
-    "dog",
-    "cat",
-    "bicycle",
-    "motorcycle",
-    "car",
-    "bus",
-    "truck",
     "wall/surface",
-}
+} | VEHICLE_LABELS | PET_LABELS | STAIRS_LABELS | POLE_LABELS
 
 
 # Higher number means higher speech priority.
@@ -35,6 +57,7 @@ PRIORITY = {
 
     # Info/status messages
     "INFO": 10,
+    "AI_READY": 10,
     "WIFI_CONNECTED": 10,
     "GPS_AVAILABLE": 10,
     "CANE_ON": 10,
@@ -45,11 +68,14 @@ PRIORITY = {
 
     # AI navigation
     "OBJECT_AHEAD": 30,
-    "PERSON_AHEAD": 30,
-    "WALL_AHEAD": 30,
+    "PERSON_AHEAD": 35,
+    "WALL_AHEAD": 35,
+    "POLE_AHEAD": 35,
     "CROWDED_AREA": 30,
     "MOVE_LEFT": 45,
     "MOVE_RIGHT": 45,
+    "VEHICLE_NEARBY": 55,
+    "STAIRS_AHEAD": 58,
     "STOP": 60,
     "CENTER_DANGER": 60,
     "HEAD_OBSTACLE": 75,
@@ -59,6 +85,7 @@ PRIORITY = {
 
     # Safety/status messages that must cut through pause/silent modes
     "BATTERY_LOW": 85,
+    "AI_UNAVAILABLE": 85,
     "HEAD_SENSOR_ALERT": 88,
 
     # Emergencies
@@ -114,6 +141,9 @@ class DecisionEngine:
 
     def __init__(self):
         self.center_danger_proximity = config.THRESHOLD_ALERT
+        self.pet_stop_proximity = config.THRESHOLD_DANGER
+        self.vehicle_stop_proximity = config.THRESHOLD_DANGER
+        self.vehicle_nearby_proximity = config.THRESHOLD_WARNING
         self.side_obstacle_proximity = config.THRESHOLD_WARNING
         self.object_ahead_proximity = config.THRESHOLD_APPROACHING
         self.crowded_people_proximity = config.THRESHOLD_WARNING
@@ -125,7 +155,7 @@ class DecisionEngine:
         obstacles = [
             obstacle
             for obstacle in detector_result.get("obstacles", [])
-            if obstacle.get("label") in MOBILITY_OBSTACLE_LABELS
+            if self._label(obstacle) in MOBILITY_OBSTACLE_LABELS
         ]
 
         if not obstacles:
@@ -142,10 +172,41 @@ class DecisionEngine:
                 obstacle=head_obstacle,
             )
 
+        vehicle_stop = self._closest(
+            obstacles,
+            labels=VEHICLE_LABELS,
+            zone="center",
+            min_proximity=self.vehicle_stop_proximity,
+        )
+        if vehicle_stop is not None:
+            return self._decision(
+                "STOP",
+                "Stop",
+                risk,
+                obstacle=vehicle_stop,
+                reason="VEHICLE_CENTER_DANGER",
+            )
+
+        pet_stop = self._closest(
+            obstacles,
+            labels=PET_LABELS,
+            zone="center",
+            min_proximity=self.pet_stop_proximity,
+        )
+        if pet_stop is not None:
+            return self._decision(
+                "STOP",
+                "Stop",
+                risk,
+                obstacle=pet_stop,
+                reason="PET_CENTER_DANGER",
+            )
+
         center_danger = self._closest(
             obstacles,
             zone="center",
             min_proximity=self.center_danger_proximity,
+            exclude_labels=VEHICLE_LABELS | PET_LABELS | STAIRS_LABELS | POLE_LABELS,
         )
         if center_danger is not None:
             return self._decision(
@@ -156,10 +217,32 @@ class DecisionEngine:
                 reason="CENTER_DANGER",
             )
 
+        stairs = self._closest(
+            obstacles,
+            labels=STAIRS_LABELS,
+            min_proximity=self.object_ahead_proximity,
+        )
+        if stairs is not None:
+            return self._decision(
+                "STAIRS_AHEAD",
+                "Stairs ahead",
+                risk,
+                obstacle=stairs,
+            )
+
+        vehicle = self._find_vehicle_nearby(obstacles)
+        if vehicle is not None:
+            return self._decision(
+                "VEHICLE_NEARBY",
+                "Vehicle nearby",
+                risk,
+                obstacle=vehicle,
+            )
+
         close_people = [
             obstacle
             for obstacle in obstacles
-            if obstacle.get("label") == "person"
+            if self._label(obstacle) == "person"
             and obstacle.get("proximity", 0.0) >= self.crowded_people_proximity
         ]
         if len(close_people) >= 2:
@@ -174,6 +257,7 @@ class DecisionEngine:
             obstacles,
             zones={"left", "right"},
             min_proximity=self.side_obstacle_proximity,
+            exclude_labels=PET_LABELS,
         )
         if side_obstacle is not None:
             if side_obstacle.get("zone") == "left":
@@ -218,6 +302,20 @@ class DecisionEngine:
                 obstacle=wall,
             )
 
+        pole = self._closest(
+            obstacles,
+            labels=POLE_LABELS,
+            zone="center",
+            min_proximity=self.object_ahead_proximity,
+        )
+        if pole is not None:
+            return self._decision(
+                "POLE_AHEAD",
+                "Pole ahead",
+                risk,
+                obstacle=pole,
+            )
+
         center_object = self._closest(
             obstacles,
             zone="center",
@@ -226,7 +324,7 @@ class DecisionEngine:
         if center_object is not None:
             return self._decision(
                 "OBJECT_AHEAD",
-                "Object ahead",
+                "Obstacle ahead",
                 risk,
                 obstacle=center_object,
             )
@@ -259,13 +357,20 @@ class DecisionEngine:
         self,
         obstacles: list[dict[str, Any]],
         label: str | None = None,
+        labels: set[str] | None = None,
+        exclude_labels: set[str] | None = None,
         zone: str | None = None,
         zones: set[str] | None = None,
         min_proximity: float = 0.0,
     ) -> dict[str, Any] | None:
         matches = []
         for obstacle in obstacles:
-            if label is not None and obstacle.get("label") != label:
+            obstacle_label = self._label(obstacle)
+            if label is not None and obstacle_label != label:
+                continue
+            if labels is not None and obstacle_label not in labels:
+                continue
+            if exclude_labels is not None and obstacle_label in exclude_labels:
                 continue
             if zone is not None and obstacle.get("zone") != zone:
                 continue
@@ -276,6 +381,24 @@ class DecisionEngine:
             matches.append(obstacle)
         return max(matches, key=lambda item: item.get("proximity", 0.0), default=None)
 
+    def _find_vehicle_nearby(
+        self,
+        obstacles: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        candidates = []
+        for obstacle in obstacles:
+            if self._label(obstacle) not in VEHICLE_LABELS:
+                continue
+            proximity = obstacle.get("proximity", 0.0)
+            is_close = proximity >= self.vehicle_nearby_proximity
+            is_centered = (
+                obstacle.get("zone") == "center"
+                and proximity >= self.object_ahead_proximity
+            )
+            if is_close or is_centered:
+                candidates.append(obstacle)
+        return max(candidates, key=lambda item: item.get("proximity", 0.0), default=None)
+
     def _find_head_obstacle(
         self,
         obstacles: list[dict[str, Any]],
@@ -283,6 +406,10 @@ class DecisionEngine:
     ) -> dict[str, Any] | None:
         candidates = []
         for obstacle in obstacles:
+            if self._label(obstacle) in (
+                PET_LABELS | VEHICLE_LABELS | STAIRS_LABELS | POLE_LABELS
+            ):
+                continue
             if obstacle.get("zone") != "center":
                 continue
             if obstacle.get("proximity", 0.0) < self.head_obstacle_proximity:
@@ -295,3 +422,6 @@ class DecisionEngine:
             if center_y_ratio <= self.head_obstacle_max_y_ratio:
                 candidates.append(obstacle)
         return max(candidates, key=lambda item: item.get("proximity", 0.0), default=None)
+
+    def _label(self, obstacle: dict[str, Any]) -> str:
+        return str(obstacle.get("label", "")).strip().lower()

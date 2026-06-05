@@ -115,6 +115,30 @@ class VoiceManager:
             self._terminate_active_process()
         return True
 
+    def speak_immediate(self, decision: GuidanceDecision) -> bool:
+        """
+        Speak a startup/status decision synchronously.
+
+        This is intentionally reserved for startup and fatal initialization
+        states, where the process may exit before the async voice worker has a
+        chance to drain its queue.
+        """
+        if not self.enabled or not decision.should_speak:
+            return False
+
+        with self._lock:
+            self._last_active_code = decision.code
+            self._last_spoken_at[decision.code] = time.monotonic()
+
+        print(f"\n[Voice] Speaking: {decision.message}")
+        ok = self._speak_backend(str(decision.message))
+
+        if ok:
+            with self._lock:
+                self._last_spoken_at[decision.code] = time.monotonic()
+
+        return ok
+
     def stop(self):
         self._stop.set()
         self._wake.set()

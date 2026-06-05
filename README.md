@@ -17,6 +17,10 @@ Camera -> Detector -> Decision Engine -> Voice Manager -> optional ESP32 UART
 - Uses offline text-to-speech instead of the old buzzer loop.
 - Optionally exchanges status with an ESP32 over UART.
 - Keeps JSON snapshot output available, but disabled by default.
+- Speaks `AI guidance ready` once after camera, detector, voice, and optional
+  UART initialization succeed.
+- Speaks `AI camera unavailable` or `AI guidance unavailable` for fatal startup
+  camera/model failures when voice is available.
 
 ## Guidance Commands
 
@@ -30,6 +34,11 @@ The decision engine uses left, center, and right zones:
 | Person center | Person ahead |
 | Wall/surface center | Wall ahead |
 | Upper-center object | Head obstacle |
+| Vehicle close or centered | Vehicle nearby |
+| Vehicle centered and very close | Stop |
+| Stairs label from detector | Stairs ahead |
+| Pole/post label from detector | Pole ahead |
+| Cat/dog below danger threshold | Obstacle ahead |
 | Multiple close people | Crowded area |
 | Safe path | Silence |
 
@@ -38,16 +47,29 @@ Priority order:
 1. `FALL_DETECTED`
 2. `SOS_SENT`
 3. `HEAD_SENSOR_ALERT`
-4. `BATTERY_LOW`
+4. `BATTERY_LOW` / `AI_UNAVAILABLE`
 5. Runtime mode changes
 6. `HEAD_OBSTACLE`
 7. `STOP` / `CENTER_DANGER`
-8. `MOVE_LEFT` / `MOVE_RIGHT`
-9. `OBJECT_AHEAD`
-10. `SAFE` / silence
+8. `STAIRS_AHEAD`
+9. `VEHICLE_NEARBY`
+10. `MOVE_LEFT` / `MOVE_RIGHT`
+11. `PERSON_AHEAD` / `WALL_AHEAD` / `POLE_AHEAD`
+12. `OBJECT_AHEAD`
+13. `INFO` / `AI_READY` / `SAFE` silence
 
 ESP32 events such as `GPS_WEAK`, `GPS_AVAILABLE`, `WIFI_LOST`, and
 `WIFI_CONNECTED` are supported as status messages.
+
+Vehicle context uses existing YOLOv8 COCO classes: `bicycle`, `motorcycle`,
+`car`, `bus`, and `truck`. Nearby vehicles are announced as `Vehicle nearby`;
+centered vehicles at the danger threshold announce `Stop`.
+
+Stairs and pole support is MVP-ready but detector-limited. Standard YOLOv8 COCO
+does not reliably provide `stairs`, `staircase`, `pole`, `traffic light pole`,
+`sign pole`, or `post` labels. The decision engine handles those labels if a
+future custom trained model, depth/segmentation model, or dedicated detector
+emits them, but it does not fake stairs or poles from unrelated objects.
 
 ## Runtime Modes
 
@@ -64,12 +86,27 @@ ESP32 mode events control Raspberry Pi voice behavior at runtime:
 
 These safety ESP32 messages still speak during AI pause, silent mode, or full
 pause: `FALL_DETECTED`, `SOS_SENT`, `HEAD_SENSOR_ALERT`, and `BATTERY_LOW`.
+`HEAD_SENSOR_ALERT` speaks `Head obstacle`, can override normal AI guidance, and
+uses the emergency speech cooldown so repeated sensor events do not spam speech.
+
+`RuntimeState` also keeps lightweight sensor-fusion readiness fields:
+`last_esp32_event`, `last_safety_event_time`, and
+`last_head_sensor_alert_time`. These are intentionally simple placeholders for
+future fusion between ESP32 safety sensors and Pi camera guidance.
+
+Left/right ultrasonic guidance remains vibration-only on the ESP32. Spoken
+left/right guidance still comes from the AI camera decisions: `Move slightly
+left` and `Move slightly right`.
 
 You can test runtime state handling without hardware:
 
 ```bash
 python test_runtime_events.py
 ```
+
+The simulation covers startup status, vehicle/stairs/pole placeholder labels,
+`HEAD_SENSOR_ALERT`, AI pause suppression, and SOS pass-through while AI is
+paused.
 
 ## Hardware Responsibilities
 
@@ -92,6 +129,10 @@ Future ESP32 responsibilities:
 
 Both sides are designed to keep working independently if the other module is
 temporarily unavailable.
+
+Final proximity thresholds should be calibrated after the 3D enclosure, camera
+angle, and final sensor mounting are fixed. The current values are kept broad
+for breadboard/prototype testing.
 
 ## Installation
 
@@ -164,6 +205,13 @@ YOLO is limited to mobility-relevant obstacles:
 `person`, `chair`, `bench`, `couch`, `dining table`, `bed`, `potted plant`,
 `backpack`, `suitcase`, `umbrella`, `dog`, `cat`, `bicycle`, `motorcycle`,
 `car`, `bus`, `truck`
+
+Vehicle classes receive special MVP context. Cat/dog detections are treated as
+lower-priority obstacles unless they are centered and very close.
+
+Placeholder decision support exists for future labels: `stairs`, `staircase`,
+`pole`, `traffic light pole`, `sign pole`, and `post`. The included YOLOv8 COCO
+model may not emit these labels without custom training or another detector.
 
 Ignored classes include `book`, `bottle`, `laptop`, `tv`, `vase`, `toilet`, and
 `refrigerator`. Wall/surface detection remains separate and does not use a YOLO

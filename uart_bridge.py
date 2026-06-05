@@ -98,6 +98,10 @@ class UartBridge:
                 decisions.append(decision)
         return decisions
 
+    @property
+    def is_connected(self) -> bool:
+        return self.enabled and self._serial is not None
+
     def send_ai_decision(self, decision: GuidanceDecision) -> bool:
         if (
             not config.UART_SEND_AI_DECISIONS
