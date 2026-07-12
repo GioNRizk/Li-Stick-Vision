@@ -64,6 +64,14 @@ class NavigationManager:
         """Return the last command released for speech, if any."""
         return self._last_command.code if self._last_command is not None else None
 
+    def reset(self):
+        """Clear all frame history, repeat history, and command locks."""
+        self._reset_candidate()
+        self._last_command = None
+        self._last_spoken_at.clear()
+        self._locked_decision = None
+        self._lock_until = 0.0
+
     def update(self, decision: GuidanceDecision) -> GuidanceDecision | None:
         """
         Return a decision only when VoiceManager should speak it.

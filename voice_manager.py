@@ -39,6 +39,8 @@ class VoiceManager:
 
         self._pending: list[GuidanceDecision] = []
         self._current: GuidanceDecision | None = None
+        self._cancel_generation = 0
+        self._current_generation = 0
         self._active_process: subprocess.Popen[str] | None = None
         self._interrupted_pids: set[int] = set()
         self._last_spoken_at: dict[str, float] = {}
@@ -114,6 +116,16 @@ class VoiceManager:
 
         return ok
 
+    def cancel_current_and_pending(self):
+        """Cancel current speech and discard queued decisions without stopping."""
+        with self._lock:
+            self._pending.clear()
+            self._last_active_code = None
+            self._cancel_generation += 1
+            self._wake.clear()
+
+        self._terminate_active_process()
+
     def stop(self):
         self._stop.set()
         self._wake.set()
@@ -134,6 +146,7 @@ class VoiceManager:
 
                 decision = self._pending.pop(0)
                 self._current = decision
+                self._current_generation = self._cancel_generation
 
                 if not self._pending:
                     self._wake.clear()
@@ -237,16 +250,20 @@ engine.runAndWait()
     ) -> bool:
         stdin = subprocess.PIPE if input_text is not None else subprocess.DEVNULL
 
-        process = subprocess.Popen(
-            args,
-            stdin=stdin,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-            creationflags=creationflags,
-        )
-
         with self._process_lock:
+            if threading.current_thread() is self._thread:
+                with self._lock:
+                    if self._current_generation != self._cancel_generation:
+                        return False
+
+            process = subprocess.Popen(
+                args,
+                stdin=stdin,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                creationflags=creationflags,
+            )
             self._active_process = process
 
         try:
@@ -286,7 +303,11 @@ engine.runAndWait()
             if process.pid is not None:
                 self._interrupted_pids.add(process.pid)
 
-            process.terminate()
+            try:
+                process.terminate()
+            except OSError:
+                # The process may have exited between poll() and terminate().
+                pass
 
     def _kill_process(self, process: subprocess.Popen[str]):
         if process.poll() is not None:

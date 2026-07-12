@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+import importlib
+import sys
+import time
+import types
+
 from decision_engine import DecisionEngine, GuidanceDecision, PRIORITY
+from navigation_manager import NavigationManager
 from runtime_state import RuntimeState
 from uart_bridge import UartBridge
+from voice_manager import VoiceManager
 
 
 EVENTS = [
@@ -70,6 +77,86 @@ def _expect(label: str, actual, expected):
     result = "PASS" if actual == expected else "FAIL"
     print(f"{result:<4} {label:<42} expected={expected!r} actual={actual!r}")
     assert actual == expected
+
+
+def _wait_until(predicate, timeout: float = 2.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
+
+
+def _load_ai_release_guard():
+    """Import main's release guard without requiring camera/AI packages."""
+    if "main" not in sys.modules:
+        cv2_stub = types.ModuleType("cv2")
+        camera_stub = types.ModuleType("camera_source")
+        detector_stub = types.ModuleType("detector")
+
+        class CameraOpenError(Exception):
+            pass
+
+        camera_stub.CameraOpenError = CameraOpenError
+        camera_stub.open_camera = lambda: None
+        detector_stub.ObstacleDetector = object
+
+        sys.modules.setdefault("cv2", cv2_stub)
+        sys.modules.setdefault("camera_source", camera_stub)
+        sys.modules.setdefault("detector", detector_stub)
+
+    return importlib.import_module("main")._release_ai_decision
+
+
+class _RecordingVoice:
+    def __init__(self):
+        self.spoken: list[GuidanceDecision] = []
+        self.cancel_count = 0
+
+    def speak_decision(self, decision: GuidanceDecision) -> bool:
+        self.spoken.append(decision)
+        return True
+
+    def cancel_current_and_pending(self):
+        self.cancel_count += 1
+
+
+class _RecordingNavigation(NavigationManager):
+    def __init__(self, stable_frames: int = 2):
+        super().__init__(
+            stable_frames=stable_frames,
+            command_lock_seconds=0.0,
+            repeat_seconds=0.0,
+        )
+        self.received: list[GuidanceDecision] = []
+        self.reset_count = 0
+
+    def update(self, decision: GuidanceDecision) -> GuidanceDecision | None:
+        self.received.append(decision)
+        return super().update(decision)
+
+    def reset(self):
+        self.reset_count += 1
+        super().reset()
+
+
+class _SubprocessVoiceManager(VoiceManager):
+    def __init__(self):
+        self.started_messages: list[str] = []
+        super().__init__(
+            enabled=True,
+            cooldown_seconds=0.0,
+            emergency_cooldown_seconds=0.0,
+            backend="test_subprocess",
+            timeout_seconds=10.0,
+        )
+
+    def _speak_backend(self, message: str) -> bool:
+        self.started_messages.append(message)
+        return self._run_command(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+        )
 
 
 def simulate_ai_decisions():
@@ -187,9 +274,182 @@ def simulate_runtime_events():
     _expect("SOS message", sos.message, "Emergency alert sent")
 
 
+def test_ai_pause_release_guards():
+    release_ai = _load_ai_release_guard()
+    parser = UartBridge(enabled=False)
+    state = RuntimeState()
+    navigation = _RecordingNavigation(stable_frames=2)
+    voice = _RecordingVoice()
+
+    print()
+    print("AI pause release guard tests")
+    print("----------------------------")
+
+    old_ai = _sample_ai_decision()
+    _expect("first AI frame is stabilizing", release_ai(
+        state, navigation, voice, old_ai
+    ), None)
+    _expect("second AI frame is released", release_ai(
+        state, navigation, voice, old_ai
+    ).code, "PERSON_AHEAD")
+
+    pause = parser._parse_line(b"AI_PAUSE_ON\n")
+    assert pause is not None
+    was_enabled = state.ai_guidance_enabled
+    state.apply_esp32_decision(pause)
+    if was_enabled and not state.ai_guidance_enabled:
+        voice.cancel_current_and_pending()
+        navigation.reset()
+
+    pause_release = navigation.update(pause)
+    assert pause_release is not None
+    voice.speak_decision(pause_release)
+
+    ai_updates_before_paused_frames = sum(
+        decision.source == "ai" for decision in navigation.received
+    )
+    ai_speech_before_paused_frames = sum(
+        decision.source == "ai" for decision in voice.spoken
+    )
+    for _ in range(5):
+        _expect("paused frame remains silent", release_ai(
+            state, navigation, voice, _sample_ai_decision()
+        ), None)
+
+    _expect(
+        "paused AI never reaches navigation",
+        sum(decision.source == "ai" for decision in navigation.received),
+        ai_updates_before_paused_frames,
+    )
+    _expect(
+        "paused AI never reaches voice",
+        sum(decision.source == "ai" for decision in voice.spoken),
+        ai_speech_before_paused_frames,
+    )
+    _expect("pause transition cancels once", voice.cancel_count, 1)
+    _expect("pause transition resets once", navigation.reset_count, 1)
+    _expect("pause runtime message speaks", voice.spoken[-1].code, "AI_PAUSE_ON")
+
+    for code in (
+        "SOS_SENT",
+        "FALL_DETECTED",
+        "HEAD_SENSOR_ALERT",
+        "BATTERY_LOW",
+        "CANE_ON",
+    ):
+        event = parser._parse_line(f"{code}\n".encode("utf-8"))
+        assert event is not None
+        state.apply_esp32_decision(event)
+        _expect(f"{code} allowed while paused", state.allows_esp32_decision(event), True)
+        voice.speak_decision(event)
+        _expect(f"{code} reaches voice", voice.spoken[-1].code, code)
+
+    resume = parser._parse_line(b"AI_PAUSE_OFF\n")
+    assert resume is not None
+    was_enabled = state.ai_guidance_enabled
+    state.apply_esp32_decision(resume)
+    if not was_enabled and state.ai_guidance_enabled:
+        navigation.reset()
+
+    resume_release = navigation.update(resume)
+    assert resume_release is not None
+    voice.speak_decision(resume_release)
+    _expect("resume transition resets navigation", navigation.reset_count, 2)
+
+    fresh_ai = GuidanceDecision(
+        code="MOVE_LEFT",
+        message="Move left",
+        priority=PRIORITY["MOVE_LEFT"],
+        risk_level="warning",
+        source="ai",
+    )
+    _expect("resume waits for a fresh stable frame", release_ai(
+        state, navigation, voice, fresh_ai
+    ), None)
+    _expect("old AI command is not replayed", voice.spoken[-1].code, "AI_PAUSE_OFF")
+    fresh_release = release_ai(state, navigation, voice, fresh_ai)
+    assert fresh_release is not None
+    _expect("fresh AI resumes after stabilization", fresh_release.code, "MOVE_LEFT")
+
+
+def test_voice_cancel_current_and_pending():
+    print()
+    print("Voice cancellation tests")
+    print("------------------------")
+
+    voice = _SubprocessVoiceManager()
+    active = _sample_ai_decision()
+    queued = GuidanceDecision(
+        code="OBJECT_AHEAD",
+        message="Obstacle ahead",
+        priority=PRIORITY["OBJECT_AHEAD"],
+        risk_level="warning",
+        source="ai",
+    )
+
+    try:
+        _expect("active AI speech accepted", voice.speak_decision(active), True)
+        _expect(
+            "active TTS subprocess started",
+            _wait_until(lambda: voice._active_process is not None),
+            True,
+        )
+        active_process = voice._active_process
+        assert active_process is not None
+
+        _expect("queued AI speech accepted", voice.speak_decision(queued), True)
+        voice.cancel_current_and_pending()
+
+        with voice._lock:
+            pending_count = len(voice._pending)
+            last_active_code = voice._last_active_code
+        _expect("queued speech is discarded", pending_count, 0)
+        _expect("last active code is reset", last_active_code, None)
+        _expect(
+            "active TTS subprocess is terminated",
+            _wait_until(lambda: active_process.poll() is not None),
+            True,
+        )
+        _expect(
+            "voice worker remains alive",
+            voice._thread is not None and voice._thread.is_alive(),
+            True,
+        )
+        time.sleep(0.1)
+        _expect(
+            "cancelled queued sentence never starts",
+            "Obstacle ahead" in voice.started_messages,
+            False,
+        )
+
+        pause_message = GuidanceDecision(
+            code="AI_PAUSE_ON",
+            message="AI guidance paused",
+            priority=PRIORITY["MODE_CHANGE"],
+            risk_level="external",
+            source="esp32",
+        )
+        _expect(
+            "runtime speech is accepted after cancellation",
+            voice.speak_decision(pause_message),
+            True,
+        )
+        _expect(
+            "worker speaks after cancellation",
+            _wait_until(
+                lambda: "AI guidance paused" in voice.started_messages
+            ),
+            True,
+        )
+    finally:
+        voice.stop()
+
+
 def main():
     simulate_ai_decisions()
     simulate_runtime_events()
+    test_ai_pause_release_guards()
+    test_voice_cancel_current_and_pending()
 
 
 if __name__ == "__main__":

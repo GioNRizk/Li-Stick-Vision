@@ -1,5 +1,6 @@
 import json
 import time
+from datetime import datetime
 from pathlib import Path
 
 import cv2
@@ -153,6 +154,58 @@ def _muted_decision(ai_decision: GuidanceDecision) -> GuidanceDecision:
     )
 
 
+def _paused_ai_decision() -> GuidanceDecision:
+    return GuidanceDecision(
+        code="AI_PAUSED",
+        message=None,
+        priority=0,
+        risk_level="safe",
+        source="runtime",
+        details={"camera_ai_paused": True},
+    )
+
+
+def _paused_detection_result(frame) -> dict:
+    height, width = frame.shape[:2]
+    return {
+        "timestamp": datetime.now().isoformat(),
+        "frame_id": None,
+        "frame_width": width,
+        "frame_height": height,
+        "risk_level": "safe",
+        "smooth_proximity": 0.0,
+        "trend": "stable",
+        "obstacle_count": 0,
+        "obstacles": [],
+        "depth_model": False,
+        "detector_skipped": True,
+    }
+
+
+def _release_ai_decision(
+    runtime_state: RuntimeState,
+    navigation: NavigationManager,
+    voice: VoiceManager,
+    ai_decision: GuidanceDecision,
+) -> GuidanceDecision | None:
+    """Release only a currently allowed, fresh AI decision to speech."""
+    if ai_decision.source != "ai" or not runtime_state.allows_ai_decision(
+        ai_decision
+    ):
+        return None
+
+    navigation_decision = navigation.update(ai_decision)
+    if (
+        navigation_decision is None
+        or navigation_decision.source != "ai"
+        or not runtime_state.allows_ai_decision(navigation_decision)
+    ):
+        return None
+
+    voice.speak_decision(navigation_decision)
+    return navigation_decision
+
+
 def _runtime_status_decision(
     code: str,
     message: str,
@@ -295,7 +348,16 @@ def main():
             released_esp32_decisions: list[GuidanceDecision] = []
             startup_suppressed_esp32_decisions: list[GuidanceDecision] = []
             for decision in esp32_decisions:
+                was_ai_guidance_enabled = runtime_state.ai_guidance_enabled
                 runtime_state.apply_esp32_decision(decision)
+                is_ai_guidance_enabled = runtime_state.ai_guidance_enabled
+
+                if was_ai_guidance_enabled and not is_ai_guidance_enabled:
+                    voice.cancel_current_and_pending()
+                    navigation.reset()
+                elif not was_ai_guidance_enabled and is_ai_guidance_enabled:
+                    navigation.reset()
+
                 if runtime_state.allows_esp32_decision(decision):
                     allowed_esp32_decisions.append(decision)
                     if _should_suppress_startup_status(
@@ -315,15 +377,27 @@ def main():
                 time.sleep(0.02)
                 continue
 
-            result, annotated = detector.detect(frame)
-            ai_decision = decision_engine.decide(result)
-            ai_guidance_allowed = runtime_state.allows_ai_decision(ai_decision)
             navigation_decision: GuidanceDecision | None = None
+            if runtime_state.ai_guidance_enabled:
+                result, annotated = detector.detect(frame)
+                ai_decision = decision_engine.decide(result)
+                ai_guidance_allowed = runtime_state.allows_ai_decision(ai_decision)
 
-            if ai_guidance_allowed:
-                navigation_decision = navigation.update(ai_decision)
+                # Hard release guard: paused/silent AI never enters navigation,
+                # and only a currently allowed AI result may enter VoiceManager.
+                navigation_decision = _release_ai_decision(
+                    runtime_state,
+                    navigation,
+                    voice,
+                    ai_decision,
+                )
             else:
-                navigation.update(_muted_decision(ai_decision))
+                # AI_PAUSE_ON is the camera-AI privacy flag. Keep reading frames
+                # for an optional display, but do not run detection at all.
+                result = _paused_detection_result(frame)
+                annotated = frame.copy()
+                ai_decision = _paused_ai_decision()
+                ai_guidance_allowed = False
 
             active_decision = _choose_display_decision(
                 navigation_decision or ai_decision,
@@ -340,7 +414,8 @@ def main():
             result["active_decision"] = active_decision.to_dict()
             result["runtime_state"] = runtime_state.mode_summary()
             result["ai_guidance_suppressed"] = (
-                ai_decision.should_speak and not ai_guidance_allowed
+                not runtime_state.ai_guidance_enabled
+                or (ai_decision.should_speak and not ai_guidance_allowed)
             )
             if esp32_decisions:
                 result["esp32_decisions"] = [
@@ -360,9 +435,8 @@ def main():
                     for decision in startup_suppressed_esp32_decisions
                 ]
 
-            if navigation_decision is not None:
-                voice.speak_decision(navigation_decision)
-            uart.send_ai_decision(ai_decision)
+            if runtime_state.ai_guidance_enabled and ai_decision.source == "ai":
+                uart.send_ai_decision(ai_decision)
 
             dt = time.perf_counter() - t0
             fps = 1.0 / max(dt, 1e-6)

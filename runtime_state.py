@@ -98,7 +98,7 @@ class RuntimeState:
         )
 
     def allows_ai_decision(self, decision: GuidanceDecision) -> bool:
-        if not decision.should_speak:
+        if decision.source != "ai" or not decision.should_speak:
             return False
         return self.allows_ai_guidance()
 
