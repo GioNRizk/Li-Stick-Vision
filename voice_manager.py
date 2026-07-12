@@ -14,13 +14,8 @@ from decision_engine import GuidanceDecision
 class VoiceManager:
     """
     Offline, non-blocking text-to-speech manager.
-
-    Raspberry Pi audio hardware-specific setup starts here if the final build
-    needs a USB speaker, audio HAT, or custom ALSA device selection.
-
-    The camera loop only calls speak_decision(). Actual speech runs in a worker
-    thread and every backend is isolated behind a short timeout. This keeps one
-    bad TTS call from freezing the guidance loop.
+    Keeps only the latest useful guidance to avoid old delayed speech.
+    NavigationManager owns frame-to-frame command stabilization.
     """
 
     def __init__(
@@ -41,6 +36,7 @@ class VoiceManager:
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._process_lock = threading.Lock()
+
         self._pending: list[GuidanceDecision] = []
         self._current: GuidanceDecision | None = None
         self._active_process: subprocess.Popen[str] | None = None
@@ -58,13 +54,6 @@ class VoiceManager:
             print("[Voice] Disabled.")
 
     def speak_decision(self, decision: GuidanceDecision) -> bool:
-        """
-        Queue the active guidance when it is new, urgent, or ready to repeat.
-
-        Repeated messages are intentionally allowed after the configured
-        cooldown while the same obstacle remains active. SAFE clears the active
-        command and stays silent.
-        """
         if not self.enabled:
             return False
 
@@ -78,9 +67,10 @@ class VoiceManager:
         cooldown = self._cooldown_for(decision)
 
         with self._lock:
-            is_new_active = decision.code != self._last_active_code
             last_spoken = self._last_spoken_at.get(decision.code, 0.0)
             cooldown_ready = now - last_spoken >= cooldown
+            is_new_active = decision.code != self._last_active_code
+
             is_interrupt = (
                 self._current is not None
                 and decision.priority > self._current.priority
@@ -92,37 +82,22 @@ class VoiceManager:
             if not (is_new_active or cooldown_ready or is_interrupt):
                 return False
 
-            if any(item.code == decision.code for item in self._pending):
-                return False
-
             self._last_active_code = decision.code
             self._last_spoken_at[decision.code] = now
 
-            if is_interrupt:
-                self._pending.clear()
-            else:
-                self._pending = [
-                    item
-                    for item in self._pending
-                    if item.priority > decision.priority
-                ]
-
+            # Main Li-Stick fix:
+            # Never keep old queued voice messages.
+            # The cane should speak the latest useful command only.
+            self._pending.clear()
             self._pending.append(decision)
-            self._pending.sort(key=lambda item: item.priority, reverse=True)
             self._wake.set()
 
         if is_interrupt:
             self._terminate_active_process()
+
         return True
 
     def speak_immediate(self, decision: GuidanceDecision) -> bool:
-        """
-        Speak a startup/status decision synchronously.
-
-        This is intentionally reserved for startup and fatal initialization
-        states, where the process may exit before the async voice worker has a
-        chance to drain its queue.
-        """
         if not self.enabled or not decision.should_speak:
             return False
 
@@ -156,8 +131,10 @@ class VoiceManager:
                 if not self._pending:
                     self._wake.clear()
                     continue
+
                 decision = self._pending.pop(0)
                 self._current = decision
+
                 if not self._pending:
                     self._wake.clear()
 
@@ -200,6 +177,7 @@ class VoiceManager:
                 return self._run_command(["say", message])
             if self.backend == "pyttsx3":
                 return self._speak_pyttsx3_subprocess(message)
+
             print(f"[Voice] Unknown TTS backend '{self.backend}'. Disabling voice.")
             self.enabled = False
             return False
@@ -245,6 +223,7 @@ engine.setProperty("rate", %d)
 engine.say(text)
 engine.runAndWait()
 """ % config.TTS_RATE
+
         return self._run_command(
             [sys.executable, "-c", script],
             input_text=message,
@@ -257,6 +236,7 @@ engine.runAndWait()
         creationflags: int = 0,
     ) -> bool:
         stdin = subprocess.PIPE if input_text is not None else subprocess.DEVNULL
+
         process = subprocess.Popen(
             args,
             stdin=stdin,
@@ -289,8 +269,12 @@ engine.runAndWait()
 
         if process.returncode == 0:
             return True
+
         stderr_text = (stderr or "").strip()
-        print(f"[Voice] Backend '{self.backend}' returned {process.returncode}: {stderr_text}")
+        print(
+            f"[Voice] Backend '{self.backend}' returned "
+            f"{process.returncode}: {stderr_text}"
+        )
         return False
 
     def _terminate_active_process(self):
@@ -298,13 +282,16 @@ engine.runAndWait()
             process = self._active_process
             if process is None or process.poll() is not None:
                 return
+
             if process.pid is not None:
                 self._interrupted_pids.add(process.pid)
+
             process.terminate()
 
     def _kill_process(self, process: subprocess.Popen[str]):
         if process.poll() is not None:
             return
+
         process.kill()
         try:
             process.communicate(timeout=0.5)

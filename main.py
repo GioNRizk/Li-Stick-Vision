@@ -8,6 +8,7 @@ import config
 from camera_source import CameraOpenError, open_camera
 from decision_engine import DecisionEngine, GuidanceDecision, PRIORITY
 from detector import ObstacleDetector
+from navigation_manager import NavigationManager
 from runtime_state import RuntimeState
 from uart_bridge import UartBridge
 from voice_manager import VoiceManager
@@ -29,6 +30,14 @@ _TREND_ARROW = {
 }
 
 BAR_WIDTH = 24
+
+_STARTUP_STATUS_CODES = {
+    "CANE_ON",
+    "GPS_AVAILABLE",
+    "GPS_WEAK",
+    "WIFI_CONNECTED",
+    "WIFI_LOST",
+}
 
 
 def _prox_bar(score: float) -> str:
@@ -159,6 +168,15 @@ def _runtime_status_decision(
     )
 
 
+def _should_suppress_startup_status(
+    decision: GuidanceDecision,
+    suppress_until: float,
+) -> bool:
+    if decision.code not in _STARTUP_STATUS_CODES:
+        return False
+    return time.monotonic() < suppress_until
+
+
 def _write_latest_json(path: Path, result: dict):
     if config.ENABLE_DETECTION_OUTPUT_JSON:
         path.write_text(json.dumps(result, indent=2), encoding="utf-8")
@@ -193,12 +211,16 @@ def main():
     print("\n" + "=" * 52)
     print("  Li-Stick Vision - Raspberry Pi MVP Guidance")
     print("=" * 52)
-    print("  Pipeline: camera -> detector -> decision -> voice -> ESP32 UART")
+    print(
+        "  Pipeline: camera -> detector -> decision -> "
+        "navigation -> voice -> ESP32 UART"
+    )
     print(f"  Voice: {'on' if config.ENABLE_VOICE else 'off'}")
     print(f"  UART : {'on' if config.ENABLE_UART else 'off'}")
     print("  Press 'q' in the camera window to quit.\n")
 
     voice = VoiceManager(enabled=config.ENABLE_VOICE)
+    navigation = NavigationManager()
 
     try:
         cap = open_camera()
@@ -246,14 +268,15 @@ def main():
     decision_engine = DecisionEngine()
     uart = UartBridge(enabled=config.ENABLE_UART)
     runtime_state = RuntimeState()
-
-    voice.speak_immediate(
-        _runtime_status_decision("AI_READY", "AI guidance ready")
+    startup_status_suppress_until = (
+        time.monotonic() + config.STARTUP_STATUS_SUPPRESS_SECONDS
     )
-    if uart.is_connected:
-        voice.speak_immediate(
-            _runtime_status_decision("CANE_ON", "Cane connected")
-        )
+
+    ready_decision = navigation.update(
+        _runtime_status_decision("AI_READY", "Li-Stick ready")
+    )
+    if ready_decision is not None:
+        voice.speak_immediate(ready_decision)
 
     out_json = Path(config.OUTPUT_JSON)
     log_path = Path(config.OUTPUT_LOG)
@@ -269,11 +292,23 @@ def main():
 
             esp32_decisions = uart.read_pending()
             allowed_esp32_decisions: list[GuidanceDecision] = []
+            released_esp32_decisions: list[GuidanceDecision] = []
+            startup_suppressed_esp32_decisions: list[GuidanceDecision] = []
             for decision in esp32_decisions:
                 runtime_state.apply_esp32_decision(decision)
                 if runtime_state.allows_esp32_decision(decision):
                     allowed_esp32_decisions.append(decision)
-                    voice.speak_decision(decision)
+                    if _should_suppress_startup_status(
+                        decision,
+                        startup_status_suppress_until,
+                    ):
+                        startup_suppressed_esp32_decisions.append(decision)
+                        continue
+
+                    released_decision = navigation.update(decision)
+                    if released_decision is not None:
+                        released_esp32_decisions.append(released_decision)
+                        voice.speak_decision(released_decision)
 
             ret, frame = cap.read()
             if not ret:
@@ -283,13 +318,25 @@ def main():
             result, annotated = detector.detect(frame)
             ai_decision = decision_engine.decide(result)
             ai_guidance_allowed = runtime_state.allows_ai_decision(ai_decision)
+            navigation_decision: GuidanceDecision | None = None
+
+            if ai_guidance_allowed:
+                navigation_decision = navigation.update(ai_decision)
+            else:
+                navigation.update(_muted_decision(ai_decision))
+
             active_decision = _choose_display_decision(
-                ai_decision,
-                allowed_esp32_decisions,
+                navigation_decision or ai_decision,
+                released_esp32_decisions,
                 ai_guidance_allowed,
             )
 
             result["ai_decision"] = ai_decision.to_dict()
+            result["navigation_decision"] = (
+                navigation_decision.to_dict()
+                if navigation_decision is not None
+                else None
+            )
             result["active_decision"] = active_decision.to_dict()
             result["runtime_state"] = runtime_state.mode_summary()
             result["ai_guidance_suppressed"] = (
@@ -303,9 +350,18 @@ def main():
                 result["allowed_esp32_decisions"] = [
                     decision.to_dict() for decision in allowed_esp32_decisions
                 ]
+            if released_esp32_decisions:
+                result["released_esp32_decisions"] = [
+                    decision.to_dict() for decision in released_esp32_decisions
+                ]
+            if startup_suppressed_esp32_decisions:
+                result["startup_suppressed_esp32_decisions"] = [
+                    decision.to_dict()
+                    for decision in startup_suppressed_esp32_decisions
+                ]
 
-            if ai_guidance_allowed:
-                voice.speak_decision(ai_decision)
+            if navigation_decision is not None:
+                voice.speak_decision(navigation_decision)
             uart.send_ai_decision(ai_decision)
 
             dt = time.perf_counter() - t0

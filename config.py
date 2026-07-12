@@ -57,6 +57,15 @@ PROXIMITY_EMA_ALPHA = 0.25
 # Offline text-to-speech replaces the old buzzer loop. If TTS is unavailable,
 # the app keeps detecting and simply prints guidance in the console.
 ENABLE_VOICE = True
+
+# NavigationManager smooths frame-by-frame AI guidance before TTS.
+NAV_STABLE_FRAMES = 2
+NAV_COMMAND_LOCK_SECONDS = 1.0
+NAV_REPEAT_SECONDS = 3.0
+
+# Ignore non-critical CANE/GPS/WiFi status chatter immediately after ready.
+STARTUP_STATUS_SUPPRESS_SECONDS = 2.0
+
 VOICE_COOLDOWN_SECONDS = 2.5
 EMERGENCY_COOLDOWN_SECONDS = 1.0
 TTS_RATE = 175
