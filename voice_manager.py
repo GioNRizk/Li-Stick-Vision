@@ -41,6 +41,8 @@ class VoiceManager:
         piper_config_path: str | None = None,
         piper_volume: float | None = None,
         piper_length_scale: float | None = None,
+        piper_mode: str | None = None,
+        piper_python_path: str | None = None,
     ):
         self.enabled = enabled
         self.cooldown_seconds = cooldown_seconds
@@ -64,6 +66,14 @@ class VoiceManager:
             if piper_length_scale is None
             else piper_length_scale
         )
+        self.piper_mode = str(
+            config.PIPER_MODE if piper_mode is None else piper_mode
+        ).strip().lower()
+        self.piper_python_path = str(
+            config.PIPER_PYTHON_PATH
+            if piper_python_path is None
+            else piper_python_path
+        )
 
         self._lock = threading.Lock()
         self._wake = threading.Event()
@@ -76,6 +86,8 @@ class VoiceManager:
         self._cancel_generation = 0
         self._current_generation = 0
         self._active_process: subprocess.Popen[str] | None = None
+        self._active_synthesis_process: subprocess.Popen[str] | None = None
+        self._active_playback_process: subprocess.Popen[str] | None = None
         self._interrupted_pids: set[int] = set()
         self._last_spoken_at: dict[str, float] = {}
         self._last_active_code: str | None = None
@@ -92,7 +104,10 @@ class VoiceManager:
             self._thread = threading.Thread(target=self._loop, daemon=True)
             self._thread.start()
             if self.backend == "piper":
-                print("[Voice] Piper offline TTS enabled.")
+                if self.piper_mode == "cli":
+                    print("[Voice] Piper CLI offline TTS enabled.")
+                else:
+                    print("[Voice] Piper offline TTS enabled.")
                 print(f"[Voice] Model: {Path(self.piper_model_path).stem}")
             else:
                 print(f"[Voice] Offline TTS enabled ({self.backend}).")
@@ -254,20 +269,29 @@ class VoiceManager:
         return "pyttsx3"
 
     def _load_piper(self) -> str | None:
-        """Load Piper once, returning an unavailability reason on failure."""
-        try:
-            piper = importlib.import_module("piper")
-            piper_voice_class = piper.PiperVoice
-            synthesis_config_class = piper.SynthesisConfig
-        except Exception as exc:
-            return f"package import failed: {exc}"
-
+        """Initialize the configured Piper mode or return a failure reason."""
         model_path = Path(self.piper_model_path)
         config_path = Path(self.piper_config_path)
         if not model_path.is_file():
             return f"model file not found: {model_path}"
         if not config_path.is_file():
             return f"configuration file not found: {config_path}"
+
+        if self.piper_mode == "cli":
+            python_path = Path(self.piper_python_path)
+            if not python_path.is_file():
+                return f"Python executable not found: {python_path}"
+            return None
+
+        if self.piper_mode != "api":
+            return f"unknown Piper mode '{self.piper_mode}'"
+
+        try:
+            piper = importlib.import_module("piper")
+            piper_voice_class = piper.PiperVoice
+            synthesis_config_class = piper.SynthesisConfig
+        except Exception as exc:
+            return f"package import failed: {exc}"
 
         try:
             self._piper_voice = piper_voice_class.load(
@@ -295,7 +319,10 @@ class VoiceManager:
         return "none"
 
     def _activate_espeak_fallback(self, reason: str) -> str:
-        print(f"[Voice] Piper unavailable: {reason}")
+        if self.piper_mode == "cli":
+            print(f"[Voice] Piper CLI synthesis failed: {reason}")
+        else:
+            print(f"[Voice] Piper unavailable: {reason}")
         print("[Voice] Falling back to eSpeak.")
         self._piper_voice = None
         self._piper_syn_config = None
@@ -330,6 +357,79 @@ class VoiceManager:
             return False
 
     def _speak_piper(self, message: str) -> bool:
+        if self.piper_mode == "cli":
+            return self._speak_piper_cli(message)
+        return self._speak_piper_api(message)
+
+    def _speak_piper_cli(self, message: str) -> bool:
+        temp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                prefix="listick-piper-",
+                suffix=".wav",
+                delete=False,
+            ) as temp_file:
+                temp_path = Path(temp_file.name)
+
+            args = [
+                self.piper_python_path,
+                "-m",
+                "piper",
+                "--model",
+                self.piper_model_path,
+                "--config",
+                self.piper_config_path,
+                "--length-scale",
+                f"{self.piper_length_scale:.2f}",
+                "--volume",
+                str(self.piper_volume),
+                "--output_file",
+                str(temp_path),
+            ]
+
+            synthesis_started = time.perf_counter()
+            synthesis = self._run_command_result(
+                args,
+                input_text=message,
+                process_kind="piper_synthesis",
+            )
+            synthesis_seconds = time.perf_counter() - synthesis_started
+            if config.ENABLE_DEBUG_LOGGING:
+                print(
+                    f"[Voice] Piper synthesis time: "
+                    f"{synthesis_seconds:.3f} seconds"
+                )
+
+            if synthesis.interrupted or self._worker_speech_was_cancelled():
+                return False
+            if not synthesis.succeeded:
+                return self._fallback_and_speak_espeak(
+                    message,
+                    synthesis.error or "Piper process failed",
+                )
+            if not self._is_valid_wav(temp_path):
+                return self._fallback_and_speak_espeak(
+                    message,
+                    "no valid WAV was produced",
+                )
+
+            playback = self._run_command_result(
+                ["aplay", str(temp_path)],
+                process_kind="playback",
+            )
+            if playback.succeeded:
+                return True
+            if playback.interrupted or self._worker_speech_was_cancelled():
+                return False
+            return self._fallback_and_speak_espeak(
+                message,
+                f"playback failed: {playback.error}",
+            )
+        finally:
+            if temp_path is not None:
+                self._delete_temporary_wav(temp_path)
+
+    def _speak_piper_api(self, message: str) -> bool:
         if self._piper_voice is None or self._piper_syn_config is None:
             return self._fallback_and_speak_espeak(
                 message,
@@ -363,7 +463,10 @@ class VoiceManager:
             if self._worker_speech_was_cancelled():
                 return False
 
-            playback = self._run_command_result(["aplay", str(temp_path)])
+            playback = self._run_command_result(
+                ["aplay", str(temp_path)],
+                process_kind="playback",
+            )
             if playback.succeeded:
                 return True
             if playback.interrupted or self._worker_speech_was_cancelled():
@@ -374,13 +477,29 @@ class VoiceManager:
             )
         finally:
             if temp_path is not None:
-                try:
-                    temp_path.unlink(missing_ok=True)
-                except OSError as exc:
-                    print(
-                        f"[Voice] Could not delete temporary WAV "
-                        f"'{temp_path}': {exc}"
-                    )
+                self._delete_temporary_wav(temp_path)
+
+    @staticmethod
+    def _is_valid_wav(path: Path) -> bool:
+        try:
+            if not path.is_file() or path.stat().st_size <= 44:
+                return False
+            with wave.open(str(path), "rb") as wav_file:
+                return (
+                    wav_file.getnchannels() > 0
+                    and wav_file.getsampwidth() > 0
+                    and wav_file.getframerate() > 0
+                    and wav_file.getnframes() > 0
+                )
+        except (OSError, EOFError, wave.Error):
+            return False
+
+    @staticmethod
+    def _delete_temporary_wav(path: Path):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            print(f"[Voice] Could not delete temporary WAV '{path}': {exc}")
 
     def _fallback_and_speak_espeak(self, message: str, reason: str) -> bool:
         fallback = self._activate_espeak_fallback(reason)
@@ -472,6 +591,7 @@ engine.runAndWait()
         args: list[str],
         input_text: str | None = None,
         creationflags: int = 0,
+        process_kind: str = "backend",
     ) -> _CommandResult:
         stdin = subprocess.PIPE if input_text is not None else subprocess.DEVNULL
 
@@ -487,10 +607,15 @@ engine.runAndWait()
                     stderr=subprocess.PIPE,
                     text=True,
                     creationflags=creationflags,
+                    shell=False,
                 )
             except OSError as exc:
                 return _CommandResult(False, error=str(exc))
             self._active_process = process
+            if process_kind == "piper_synthesis":
+                self._active_synthesis_process = process
+            elif process_kind == "playback":
+                self._active_playback_process = process
 
         try:
             _, stderr = process.communicate(
@@ -511,6 +636,10 @@ engine.runAndWait()
             with self._process_lock:
                 if self._active_process is process:
                     self._active_process = None
+                if self._active_synthesis_process is process:
+                    self._active_synthesis_process = None
+                if self._active_playback_process is process:
+                    self._active_playback_process = None
 
         with self._process_lock:
             if process.pid in self._interrupted_pids:

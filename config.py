@@ -75,16 +75,18 @@ TTS_AMPLITUDE = 200
 TTS_BACKEND = "piper"            # piper (default), espeak, espeak-ng, auto
 TTS_TIMEOUT_SECONDS = 5.0
 
-# Piper is loaded once through its Python API and kept in memory. Audio is
-# synthesized on the CPU, then played through the current ALSA default device.
+# Piper CLI synthesis matches the verified Raspberry Pi audio output. Set
+# PIPER_MODE="api" to retain the in-process Python API implementation.
+PIPER_MODE = "cli"
 PIPER_MODEL_PATH = (
     "/home/pi/li-stick-cam/piper-voices/en_US-lessac-medium.onnx"
 )
 PIPER_CONFIG_PATH = (
     "/home/pi/li-stick-cam/piper-voices/en_US-lessac-medium.onnx.json"
 )
-PIPER_VOLUME = 1.5
+PIPER_VOLUME = 1.0
 PIPER_LENGTH_SCALE = 0.90
+PIPER_PYTHON_PATH = "/home/pi/vision-env/bin/python"
 
 # â”€â”€ ESP32 UART bridge â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Raspberry Pi hardware-specific code starts at uart_bridge.py. Keep UART off
