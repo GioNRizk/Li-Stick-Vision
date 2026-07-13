@@ -226,6 +226,16 @@ def _should_suppress_startup_status(
     return time.monotonic() < suppress_until
 
 
+def _announce_ready(voice: VoiceManager, navigation: NavigationManager) -> bool:
+    """Speak the single backend-independent startup confirmation."""
+    ready_decision = navigation.update(
+        _runtime_status_decision("AI_READY", "Li-Stick ready")
+    )
+    if ready_decision is None:
+        return False
+    return voice.speak_immediate(ready_decision)
+
+
 def _write_latest_json(path: Path, result: dict):
     if config.ENABLE_DETECTION_OUTPUT_JSON:
         path.write_text(json.dumps(result, indent=2), encoding="utf-8")
@@ -321,11 +331,7 @@ def main():
         time.monotonic() + config.STARTUP_STATUS_SUPPRESS_SECONDS
     )
 
-    ready_decision = navigation.update(
-        _runtime_status_decision("AI_READY", "Li-Stick ready")
-    )
-    if ready_decision is not None:
-        voice.speak_immediate(ready_decision)
+    _announce_ready(voice, navigation)
 
     out_json = Path(config.OUTPUT_JSON)
     log_path = Path(config.OUTPUT_LOG)

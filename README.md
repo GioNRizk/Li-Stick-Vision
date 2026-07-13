@@ -17,7 +17,7 @@ Camera -> Detector -> Decision Engine -> Voice Manager -> optional ESP32 UART
 - Uses offline text-to-speech instead of the old buzzer loop.
 - Optionally exchanges status with an ESP32 over UART.
 - Keeps JSON snapshot output available, but disabled by default.
-- Speaks `AI guidance ready` once after camera, detector, voice, and optional
+- Speaks `Li-Stick ready` once after camera, detector, voice, and optional
   UART initialization succeed.
 - Speaks `AI camera unavailable` or `AI guidance unavailable` for fatal startup
   camera/model failures when voice is available.
@@ -180,6 +180,7 @@ Recommended settings in `config.py`:
 SHOW_WINDOW = False
 CAMERA_BACKEND = "auto"
 ENABLE_VOICE = True
+TTS_BACKEND = "piper"
 ENABLE_UART = True
 UART_PORT = "/dev/serial0"
 ```
@@ -211,9 +212,19 @@ Key settings live in `config.py`:
 | `LOG_ON_RISK_CHANGE_ONLY` | `True` | Log only risk/command changes |
 | `VOICE_COOLDOWN_SECONDS` | `2.5` | Suppress repeated AI phrases |
 | `EMERGENCY_COOLDOWN_SECONDS` | `1.0` | Suppress repeated emergency phrases |
-| `TTS_BACKEND` | `"auto"` | Offline TTS backend selection |
+| `TTS_BACKEND` | `"piper"` | Piper primary TTS; eSpeak is the automatic fallback |
 | `TTS_TIMEOUT_SECONDS` | `5.0` | Prevent one TTS call from blocking repeats |
+| `PIPER_MODEL_PATH` | `/home/pi/li-stick-cam/piper-voices/en_US-lessac-medium.onnx` | Absolute Piper ONNX model path |
+| `PIPER_CONFIG_PATH` | `/home/pi/li-stick-cam/piper-voices/en_US-lessac-medium.onnx.json` | Absolute Piper voice configuration path |
+| `PIPER_VOLUME` | `1.5` | Piper audio volume multiplier |
+| `PIPER_LENGTH_SCALE` | `0.90` | Piper speech duration scale |
 | `ENABLE_DETECTION_OUTPUT_JSON` | `False` | Preserve old detection_output.json behavior |
+
+Piper is loaded once through its Python API with CPU inference. Each phrase is
+written to a unique temporary WAV, played through the default ALSA device with
+`aplay`, and deleted afterward. Run `python tts_test.py` manually to exercise
+the configured backend with the standard Li-Stick status and safety phrases;
+the phrase set is never run during normal startup.
 
 ## Detected Classes
 

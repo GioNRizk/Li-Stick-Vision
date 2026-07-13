@@ -1,14 +1,26 @@
 from __future__ import annotations
 
+import importlib
 import platform
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+import wave
+from dataclasses import dataclass
+from pathlib import Path
 
 import config
 from decision_engine import GuidanceDecision
+
+
+@dataclass(frozen=True)
+class _CommandResult:
+    succeeded: bool
+    interrupted: bool = False
+    error: str = ""
 
 
 class VoiceManager:
@@ -23,19 +35,41 @@ class VoiceManager:
         enabled: bool = True,
         cooldown_seconds: float = config.VOICE_COOLDOWN_SECONDS,
         emergency_cooldown_seconds: float = config.EMERGENCY_COOLDOWN_SECONDS,
-        backend: str = config.TTS_BACKEND,
+        backend: str | None = None,
         timeout_seconds: float = config.TTS_TIMEOUT_SECONDS,
+        piper_model_path: str | None = None,
+        piper_config_path: str | None = None,
+        piper_volume: float | None = None,
+        piper_length_scale: float | None = None,
     ):
         self.enabled = enabled
         self.cooldown_seconds = cooldown_seconds
         self.emergency_cooldown_seconds = emergency_cooldown_seconds
-        self.backend = self._select_backend(backend)
         self.timeout_seconds = timeout_seconds
+        self.piper_model_path = str(
+            config.PIPER_MODEL_PATH
+            if piper_model_path is None
+            else piper_model_path
+        )
+        self.piper_config_path = str(
+            config.PIPER_CONFIG_PATH
+            if piper_config_path is None
+            else piper_config_path
+        )
+        self.piper_volume = float(
+            config.PIPER_VOLUME if piper_volume is None else piper_volume
+        )
+        self.piper_length_scale = float(
+            config.PIPER_LENGTH_SCALE
+            if piper_length_scale is None
+            else piper_length_scale
+        )
 
         self._lock = threading.Lock()
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._process_lock = threading.Lock()
+        self._speech_lock = threading.Lock()
 
         self._pending: list[GuidanceDecision] = []
         self._current: GuidanceDecision | None = None
@@ -45,12 +79,23 @@ class VoiceManager:
         self._interrupted_pids: set[int] = set()
         self._last_spoken_at: dict[str, float] = {}
         self._last_active_code: str | None = None
+        self._piper_voice: object | None = None
+        self._piper_syn_config: object | None = None
 
         self._thread: threading.Thread | None = None
+        requested_backend = config.TTS_BACKEND if backend is None else backend
+        self.backend = (
+            self._select_backend(requested_backend) if self.enabled else "none"
+        )
+
         if self.enabled and self.backend != "none":
             self._thread = threading.Thread(target=self._loop, daemon=True)
             self._thread.start()
-            print(f"[Voice] Offline TTS enabled ({self.backend}).")
+            if self.backend == "piper":
+                print("[Voice] Piper offline TTS enabled.")
+                print(f"[Voice] Model: {Path(self.piper_model_path).stem}")
+            else:
+                print(f"[Voice] Offline TTS enabled ({self.backend}).")
         else:
             self.enabled = False
             print("[Voice] Disabled.")
@@ -96,6 +141,12 @@ class VoiceManager:
             self._last_active_code = decision.code
             self._last_spoken_at[decision.code] = now
 
+            # Invalidate a lower-priority synthesis as well as terminating any
+            # active playback process. Piper inference itself is synchronous,
+            # so the resulting routine WAV is discarded before it reaches ALSA.
+            if is_interrupt:
+                self._cancel_generation += 1
+
             if decision.is_emergency:
                 # Discard queued navigation, retain distinct emergency events in
                 # arrival order, and put higher-priority emergencies first.
@@ -124,7 +175,7 @@ class VoiceManager:
             self._last_spoken_at[decision.code] = time.monotonic()
 
         print(f"\n[Voice] Speaking: {decision.message}")
-        ok = self._speak_backend(str(decision.message))
+        ok = self._perform_speech(str(decision.message))
 
         if ok:
             with self._lock:
@@ -168,7 +219,7 @@ class VoiceManager:
                     self._wake.clear()
 
             print(f"\n[Voice] Speaking: {decision.message}")
-            ok = self._speak_backend(str(decision.message))
+            ok = self._perform_speech(str(decision.message))
 
             with self._lock:
                 if ok:
@@ -182,6 +233,12 @@ class VoiceManager:
 
     def _select_backend(self, requested: str) -> str:
         requested = (requested or "auto").lower()
+        if requested == "piper":
+            unavailable_reason = self._load_piper()
+            if unavailable_reason is None:
+                return "piper"
+            return self._activate_espeak_fallback(unavailable_reason)
+
         if requested != "auto":
             return requested
 
@@ -196,8 +253,66 @@ class VoiceManager:
             return "espeak"
         return "pyttsx3"
 
+    def _load_piper(self) -> str | None:
+        """Load Piper once, returning an unavailability reason on failure."""
+        try:
+            piper = importlib.import_module("piper")
+            piper_voice_class = piper.PiperVoice
+            synthesis_config_class = piper.SynthesisConfig
+        except Exception as exc:
+            return f"package import failed: {exc}"
+
+        model_path = Path(self.piper_model_path)
+        config_path = Path(self.piper_config_path)
+        if not model_path.is_file():
+            return f"model file not found: {model_path}"
+        if not config_path.is_file():
+            return f"configuration file not found: {config_path}"
+
+        try:
+            self._piper_voice = piper_voice_class.load(
+                str(model_path),
+                config_path=str(config_path),
+                use_cuda=False,
+            )
+            self._piper_syn_config = synthesis_config_class(
+                volume=self.piper_volume,
+                length_scale=self.piper_length_scale,
+            )
+        except Exception as exc:
+            self._piper_voice = None
+            self._piper_syn_config = None
+            return f"model loading failed: {exc}"
+
+        return None
+
+    def _select_espeak_fallback(self) -> str:
+        if shutil.which("espeak-ng"):
+            return "espeak-ng"
+        if shutil.which("espeak"):
+            return "espeak"
+        print("[Voice] eSpeak fallback unavailable: executable not found.")
+        return "none"
+
+    def _activate_espeak_fallback(self, reason: str) -> str:
+        print(f"[Voice] Piper unavailable: {reason}")
+        print("[Voice] Falling back to eSpeak.")
+        self._piper_voice = None
+        self._piper_syn_config = None
+        return self._select_espeak_fallback()
+
+    def _perform_speech(self, message: str) -> bool:
+        # A single lock covers model inference and playback, preventing overlap
+        # with speak_immediate calls while the queue worker is active.
+        with self._speech_lock:
+            if self._worker_speech_was_cancelled():
+                return False
+            return self._speak_backend(message)
+
     def _speak_backend(self, message: str) -> bool:
         try:
+            if self.backend == "piper":
+                return self._speak_piper(message)
             if self.backend == "windows_sapi":
                 return self._speak_windows_sapi(message)
             if self.backend in {"espeak", "espeak-ng"}:
@@ -213,6 +328,76 @@ class VoiceManager:
         except Exception as exc:
             print(f"[Voice] Speech failed: {exc}. Continuing silently.")
             return False
+
+    def _speak_piper(self, message: str) -> bool:
+        if self._piper_voice is None or self._piper_syn_config is None:
+            return self._fallback_and_speak_espeak(
+                message,
+                "voice model is not loaded",
+            )
+
+        temp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                prefix="listick-piper-",
+                suffix=".wav",
+                delete=False,
+            ) as temp_file:
+                temp_path = Path(temp_file.name)
+
+            try:
+                with wave.open(str(temp_path), "wb") as wav_file:
+                    self._piper_voice.synthesize_wav(
+                        message,
+                        wav_file,
+                        syn_config=self._piper_syn_config,
+                    )
+            except Exception as exc:
+                if self._worker_speech_was_cancelled():
+                    return False
+                return self._fallback_and_speak_espeak(
+                    message,
+                    f"synthesis failed: {exc}",
+                )
+
+            if self._worker_speech_was_cancelled():
+                return False
+
+            playback = self._run_command_result(["aplay", str(temp_path)])
+            if playback.succeeded:
+                return True
+            if playback.interrupted or self._worker_speech_was_cancelled():
+                return False
+            return self._fallback_and_speak_espeak(
+                message,
+                f"playback failed: {playback.error}",
+            )
+        finally:
+            if temp_path is not None:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except OSError as exc:
+                    print(
+                        f"[Voice] Could not delete temporary WAV "
+                        f"'{temp_path}': {exc}"
+                    )
+
+    def _fallback_and_speak_espeak(self, message: str, reason: str) -> bool:
+        fallback = self._activate_espeak_fallback(reason)
+        self.backend = fallback
+        if fallback == "none":
+            self.enabled = False
+            return False
+        return self._speak_espeak(message, fallback)
+
+    def _worker_speech_was_cancelled(self) -> bool:
+        if threading.current_thread() is not self._thread:
+            return False
+        with self._lock:
+            return (
+                self._stop.is_set()
+                or self._current_generation != self._cancel_generation
+            )
 
     def _speak_windows_sapi(self, message: str) -> bool:
         script = """
@@ -238,7 +423,16 @@ $synth.Speak($text)
 
     def _speak_espeak(self, message: str, command: str) -> bool:
         return self._run_command(
-            [command, "-s", str(config.TTS_RATE), message],
+            [
+                command,
+                "-s",
+                str(config.TTS_RATE),
+                "-v",
+                str(config.TTS_VOICE),
+                "-a",
+                str(config.TTS_AMPLITUDE),
+                message,
+            ],
         )
 
     def _speak_pyttsx3_subprocess(self, message: str) -> bool:
@@ -264,22 +458,38 @@ engine.runAndWait()
         input_text: str | None = None,
         creationflags: int = 0,
     ) -> bool:
+        result = self._run_command_result(
+            args,
+            input_text=input_text,
+            creationflags=creationflags,
+        )
+        if not result.succeeded and not result.interrupted:
+            print(f"[Voice] Backend '{self.backend}' failed: {result.error}")
+        return result.succeeded
+
+    def _run_command_result(
+        self,
+        args: list[str],
+        input_text: str | None = None,
+        creationflags: int = 0,
+    ) -> _CommandResult:
         stdin = subprocess.PIPE if input_text is not None else subprocess.DEVNULL
 
         with self._process_lock:
-            if threading.current_thread() is self._thread:
-                with self._lock:
-                    if self._current_generation != self._cancel_generation:
-                        return False
+            if self._worker_speech_was_cancelled():
+                return _CommandResult(False, interrupted=True)
 
-            process = subprocess.Popen(
-                args,
-                stdin=stdin,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                text=True,
-                creationflags=creationflags,
-            )
+            try:
+                process = subprocess.Popen(
+                    args,
+                    stdin=stdin,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    creationflags=creationflags,
+                )
+            except OSError as exc:
+                return _CommandResult(False, error=str(exc))
             self._active_process = process
 
         try:
@@ -289,26 +499,35 @@ engine.runAndWait()
             )
         except subprocess.TimeoutExpired:
             self._kill_process(process)
-            print(f"[Voice] Backend '{self.backend}' timed out.")
-            return False
+            with self._process_lock:
+                if process.pid in self._interrupted_pids:
+                    self._interrupted_pids.discard(process.pid)
+                    return _CommandResult(False, interrupted=True)
+            return _CommandResult(
+                False,
+                error=f"timed out after {self.timeout_seconds:.1f} seconds",
+            )
         finally:
             with self._process_lock:
                 if self._active_process is process:
                     self._active_process = None
 
-        if process.pid in self._interrupted_pids:
-            self._interrupted_pids.discard(process.pid)
-            return False
+        with self._process_lock:
+            if process.pid in self._interrupted_pids:
+                self._interrupted_pids.discard(process.pid)
+                return _CommandResult(False, interrupted=True)
 
         if process.returncode == 0:
-            return True
+            return _CommandResult(True)
 
         stderr_text = (stderr or "").strip()
-        print(
-            f"[Voice] Backend '{self.backend}' returned "
-            f"{process.returncode}: {stderr_text}"
+        error = f"returned {process.returncode}"
+        if stderr_text:
+            error = f"{error}: {stderr_text}"
+        return _CommandResult(
+            False,
+            error=error,
         )
-        return False
 
     def _terminate_active_process(self):
         with self._process_lock:
@@ -329,7 +548,10 @@ engine.runAndWait()
         if process.poll() is not None:
             return
 
-        process.kill()
+        try:
+            process.kill()
+        except OSError:
+            return
         try:
             process.communicate(timeout=0.5)
         except subprocess.TimeoutExpired:
