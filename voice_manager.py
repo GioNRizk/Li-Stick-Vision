@@ -80,18 +80,34 @@ class VoiceManager:
 
             if self._current is not None and self._current.code == decision.code:
                 return False
+            if any(item.code == decision.code for item in self._pending):
+                return False
 
             if not (is_new_active or cooldown_ready or is_interrupt):
+                return False
+
+            # Routine guidance must never replace an active or queued emergency.
+            if not decision.is_emergency and (
+                (self._current is not None and self._current.is_emergency)
+                or any(item.is_emergency for item in self._pending)
+            ):
                 return False
 
             self._last_active_code = decision.code
             self._last_spoken_at[decision.code] = now
 
-            # Main Li-Stick fix:
-            # Never keep old queued voice messages.
-            # The cane should speak the latest useful command only.
-            self._pending.clear()
-            self._pending.append(decision)
+            if decision.is_emergency:
+                # Discard queued navigation, retain distinct emergency events in
+                # arrival order, and put higher-priority emergencies first.
+                self._pending = [
+                    item for item in self._pending if item.is_emergency
+                ]
+                self._pending.append(decision)
+                self._pending.sort(key=lambda item: item.priority, reverse=True)
+            else:
+                # Normal guidance keeps only the latest useful command.
+                self._pending.clear()
+                self._pending.append(decision)
             self._wake.set()
 
         if is_interrupt:

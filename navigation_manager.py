@@ -4,7 +4,7 @@ import time
 from collections.abc import Callable
 
 import config
-from decision_engine import GuidanceDecision
+from decision_engine import GuidanceDecision, SOS_EVENT_CODES
 
 
 BYPASS_STABILIZATION_CODES = {
@@ -13,11 +13,9 @@ BYPASS_STABILIZATION_CODES = {
     "HEAD_OBSTACLE",
     "HEAD_SENSOR_ALERT",
     "SOS",
-    "SOS_SENT",
-    "SOS_HOLD_STARTED",
     "FALL",
     "FALL_DETECTED",
-}
+} | SOS_EVENT_CODES
 
 LOCKING_CODES = {
     "STOP",
@@ -25,10 +23,9 @@ LOCKING_CODES = {
     "HEAD_OBSTACLE",
     "HEAD_SENSOR_ALERT",
     "SOS",
-    "SOS_SENT",
     "FALL",
     "FALL_DETECTED",
-}
+} | SOS_EVENT_CODES
 
 
 class NavigationManager:
@@ -137,6 +134,10 @@ class NavigationManager:
     def _is_blocked_by_lock(self, decision: GuidanceDecision) -> bool:
         locked = self._locked_decision
         if locked is None:
+            return False
+        # A lock may hold back routine guidance, never the next emergency state
+        # transition (for example, failure followed quickly by delivery).
+        if decision.is_emergency:
             return False
         if not self._is_lock_sensitive(decision):
             return False

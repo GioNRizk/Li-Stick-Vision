@@ -58,13 +58,7 @@ PRIORITY = {
     # Info/status messages
     "INFO": 10,
     "AI_READY": 10,
-    "WIFI_CONNECTED": 10,
-    "GPS_AVAILABLE": 10,
     "CANE_ON": 10,
-
-    # Warnings
-    "GPS_WEAK": 25,
-    "WIFI_LOST": 25,
 
     # AI navigation
     "OBJECT_AHEAD": 30,
@@ -89,16 +83,34 @@ PRIORITY = {
     "HEAD_SENSOR_ALERT": 88,
 
     # Emergencies
+    "SOS_HOLD_STARTED": 90,
+    "SOS_CANCELLED": 90,
+    "SOS_REQUESTED": 90,
+    "SOS_DELIVERED_WITH_LOCATION": 90,
+    "SOS_DELIVERED_WITHOUT_LOCATION": 90,
+    "SOS_FAILED_NO_CONNECTION": 90,
+    "SOS_DELIVERY_FAILED": 90,
+    # Temporary compatibility for older ESP32 firmware.
     "SOS_SENT": 90,
     "FALL_DETECTED": 100,
 }
 
+SOS_EVENT_CODES = {
+    "SOS_HOLD_STARTED",
+    "SOS_CANCELLED",
+    "SOS_REQUESTED",
+    "SOS_DELIVERED_WITH_LOCATION",
+    "SOS_DELIVERED_WITHOUT_LOCATION",
+    "SOS_FAILED_NO_CONNECTION",
+    "SOS_DELIVERY_FAILED",
+    "SOS_SENT",
+}
+
 EMERGENCY_CODES = {
     "FALL_DETECTED",
-    "SOS_SENT",
     "HEAD_SENSOR_ALERT",
     "BATTERY_LOW",
-}
+} | SOS_EVENT_CODES
 
 
 @dataclass(slots=True)

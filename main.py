@@ -34,10 +34,6 @@ BAR_WIDTH = 24
 
 _STARTUP_STATUS_CODES = {
     "CANE_ON",
-    "GPS_AVAILABLE",
-    "GPS_WEAK",
-    "WIFI_CONNECTED",
-    "WIFI_LOST",
 }
 
 

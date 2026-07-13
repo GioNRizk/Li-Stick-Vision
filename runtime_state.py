@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 
-from decision_engine import GuidanceDecision
+from decision_engine import GuidanceDecision, SOS_EVENT_CODES
 
 
 MODE_EVENT_CODES = {
@@ -32,17 +32,15 @@ AI_NAVIGATION_CODES = {
 
 ALWAYS_SPEAK_ESP32_CODES = {
     "FALL_DETECTED",
-    "SOS_SENT",
     "HEAD_SENSOR_ALERT",
     "BATTERY_LOW",
-}
+} | SOS_EVENT_CODES
 
 SAFETY_EVENT_CODES = {
     "FALL_DETECTED",
-    "SOS_SENT",
     "HEAD_SENSOR_ALERT",
     "BATTERY_LOW",
-}
+} | SOS_EVENT_CODES
 
 
 @dataclass

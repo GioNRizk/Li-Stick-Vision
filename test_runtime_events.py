@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import importlib
+import io
 import sys
 import time
 import types
+from contextlib import redirect_stdout
 
 from decision_engine import DecisionEngine, GuidanceDecision, PRIORITY
 from navigation_manager import NavigationManager
 from runtime_state import RuntimeState
-from uart_bridge import UartBridge
+from uart_bridge import ESP32_MESSAGES, UartBridge
 from voice_manager import VoiceManager
 
 
@@ -19,10 +21,30 @@ EVENTS = [
     "SILENT_MODE_OFF",
     "FULL_PAUSE_ON",
     "FULL_PAUSE_OFF",
-    "SOS_SENT",
+    "SOS_HOLD_STARTED",
+    "SOS_CANCELLED",
+    "SOS_REQUESTED",
+    "SOS_DELIVERED_WITH_LOCATION",
+    "SOS_DELIVERED_WITHOUT_LOCATION",
+    "SOS_FAILED_NO_CONNECTION",
+    "SOS_DELIVERY_FAILED",
     "FALL_DETECTED",
     "HEAD_SENSOR_ALERT",
 ]
+
+EXPECTED_SOS_MESSAGES = {
+    "SOS_HOLD_STARTED": "Hold for emergency",
+    "SOS_CANCELLED": "Emergency cancelled",
+    "SOS_REQUESTED": "Sending emergency alert",
+    "SOS_DELIVERED_WITH_LOCATION": "Emergency alert sent with location",
+    "SOS_DELIVERED_WITHOUT_LOCATION": (
+        "Emergency alert sent. Location unavailable"
+    ),
+    "SOS_FAILED_NO_CONNECTION": (
+        "No connection. Retrying emergency alert"
+    ),
+    "SOS_DELIVERY_FAILED": "Emergency delivery failed. Retrying",
+}
 
 
 def _sample_ai_decision() -> GuidanceDecision:
@@ -122,6 +144,17 @@ class _RecordingVoice:
         self.cancel_count += 1
 
 
+class _FakeClock:
+    def __init__(self, now: float = 100.0):
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float):
+        self.now += seconds
+
+
 class _RecordingNavigation(NavigationManager):
     def __init__(self, stable_frames: int = 2):
         super().__init__(
@@ -157,6 +190,284 @@ class _SubprocessVoiceManager(VoiceManager):
         return self._run_command(
             [sys.executable, "-c", "import time; time.sleep(30)"],
         )
+
+
+def _speak_uart_sequence(
+    events: list[str],
+    state: RuntimeState | None = None,
+    parser: UartBridge | None = None,
+) -> list[str]:
+    state = state or RuntimeState()
+    parser = parser or UartBridge(enabled=False)
+    navigation = NavigationManager(
+        stable_frames=1,
+        command_lock_seconds=1.0,
+        repeat_seconds=0.0,
+    )
+    voice = _RecordingVoice()
+
+    for event in events:
+        decision = parser._parse_line(f"{event}\n".encode("utf-8"))
+        if decision is None:
+            continue
+        state.apply_esp32_decision(decision)
+        if not state.allows_esp32_decision(decision):
+            continue
+        released = navigation.update(decision)
+        if released is not None:
+            voice.speak_decision(released)
+
+    return [str(decision.message) for decision in voice.spoken]
+
+
+def test_sos_uart_mapping_and_deprecated_events():
+    print("SOS UART mapping tests")
+    print("----------------------")
+
+    actual_messages = {
+        code: ESP32_MESSAGES[code][0]
+        for code in EXPECTED_SOS_MESSAGES
+    }
+    _expect("new SOS speech mapping", actual_messages, EXPECTED_SOS_MESSAGES)
+    _expect(
+        "new SOS wording does not say SMS",
+        any("sms" in message.lower() for message in actual_messages.values()),
+        False,
+    )
+
+    parser = UartBridge(enabled=False)
+    for code in (
+        "GPS_AVAILABLE",
+        "GPS_WEAK",
+        "WIFI_CONNECTED",
+        "WIFI_LOST",
+    ):
+        _expect(f"{code} has no speech mapping", code in ESP32_MESSAGES, False)
+        _expect(
+            f"{code} is logged and ignored",
+            parser._parse_line(f"{code}\n".encode("utf-8")),
+            None,
+        )
+
+    legacy = parser._parse_line(b"SOS_SENT\n")
+    assert legacy is not None
+    _expect("legacy SOS_SENT remains an alias", legacy.message, "Emergency alert sent")
+
+    output = io.StringIO()
+    with redirect_stdout(output):
+        unknown = parser._parse_line(b"UNRECOGNIZED_EVENT\n")
+    _expect("unknown UART event is ignored", unknown, None)
+    _expect(
+        "unknown UART event is logged",
+        "[UART] Unknown message ignored: UNRECOGNIZED_EVENT" in output.getvalue(),
+        True,
+    )
+    print()
+
+
+def test_sos_acceptance_sequences():
+    print("SOS acceptance sequences")
+    print("------------------------")
+
+    cases = (
+        (
+            "hold then cancel",
+            ["SOS_HOLD_STARTED", "SOS_CANCELLED"],
+            ["Hold for emergency", "Emergency cancelled"],
+        ),
+        (
+            "delivery with location",
+            [
+                "SOS_HOLD_STARTED",
+                "SOS_REQUESTED",
+                "SOS_DELIVERED_WITH_LOCATION",
+            ],
+            [
+                "Hold for emergency",
+                "Sending emergency alert",
+                "Emergency alert sent with location",
+            ],
+        ),
+        (
+            "delivery without location",
+            ["SOS_REQUESTED", "SOS_DELIVERED_WITHOUT_LOCATION"],
+            [
+                "Sending emergency alert",
+                "Emergency alert sent. Location unavailable",
+            ],
+        ),
+        (
+            "duplicate no-connection failure",
+            [
+                "SOS_REQUESTED",
+                "SOS_FAILED_NO_CONNECTION",
+                "SOS_FAILED_NO_CONNECTION",
+                "SOS_FAILED_NO_CONNECTION",
+            ],
+            [
+                "Sending emergency alert",
+                "No connection. Retrying emergency alert",
+            ],
+        ),
+        (
+            "failure followed by final delivery",
+            [
+                "SOS_REQUESTED",
+                "SOS_FAILED_NO_CONNECTION",
+                "SOS_DELIVERED_WITH_LOCATION",
+            ],
+            [
+                "Sending emergency alert",
+                "No connection. Retrying emergency alert",
+                "Emergency alert sent with location",
+            ],
+        ),
+    )
+
+    for label, events, expected in cases:
+        _expect(label, _speak_uart_sequence(events), expected)
+
+    for mode_code in ("AI_PAUSE_ON", "SILENT_MODE_ON", "FULL_PAUSE_ON"):
+        state = RuntimeState()
+        parser = UartBridge(enabled=False)
+        mode = parser._parse_line(f"{mode_code}\n".encode("utf-8"))
+        assert mode is not None
+        state.apply_esp32_decision(mode)
+        spoken = _speak_uart_sequence(
+            ["SOS_REQUESTED", "SOS_DELIVERED_WITHOUT_LOCATION"],
+            state=state,
+            parser=parser,
+        )
+        _expect(
+            f"SOS bypasses {mode_code}",
+            spoken,
+            [
+                "Sending emergency alert",
+                "Emergency alert sent. Location unavailable",
+            ],
+        )
+    print()
+
+
+def test_sos_duplicate_suppression_windows():
+    print("SOS duplicate suppression windows")
+    print("---------------------------------")
+
+    for code, window in (
+        ("SOS_REQUESTED", 3.0),
+        ("SOS_FAILED_NO_CONNECTION", 10.0),
+        ("SOS_DELIVERY_FAILED", 10.0),
+        ("SOS_DELIVERED_WITH_LOCATION", 10.0),
+        ("SOS_DELIVERED_WITHOUT_LOCATION", 10.0),
+    ):
+        clock = _FakeClock()
+        parser = UartBridge(enabled=False, clock=clock)
+        first = parser._parse_line(f"{code}\n".encode("utf-8"))
+        assert first is not None
+
+        clock.advance(window - 0.01)
+        _expect(
+            f"{code} suppressed inside {window:g}s",
+            parser._parse_line(f"{code}\n".encode("utf-8")),
+            None,
+        )
+
+        clock.advance(0.01)
+        repeated = parser._parse_line(f"{code}\n".encode("utf-8"))
+        _expect(
+            f"{code} allowed after {window:g}s",
+            repeated is not None,
+            True,
+        )
+
+    parser = UartBridge(enabled=False)
+    failure = parser._parse_line(b"SOS_FAILED_NO_CONNECTION\n")
+    delivered = parser._parse_line(b"SOS_DELIVERED_WITH_LOCATION\n")
+    _expect("failure event is accepted", failure is not None, True)
+    _expect("delivery is independent of failure cooldown", delivered is not None, True)
+    print()
+
+
+def test_emergency_voice_priority():
+    print("Emergency voice priority")
+    print("------------------------")
+
+    for code in (
+        "SOS_REQUESTED",
+        "SOS_DELIVERED_WITH_LOCATION",
+        "SOS_DELIVERED_WITHOUT_LOCATION",
+        "SOS_FAILED_NO_CONNECTION",
+        "SOS_DELIVERY_FAILED",
+        "SOS_CANCELLED",
+        "FALL_DETECTED",
+    ):
+        _expect(
+            f"{code} outranks navigation",
+            PRIORITY[code] > PRIORITY["HEAD_OBSTACLE"],
+            True,
+        )
+
+    voice = _SubprocessVoiceManager()
+    parser = UartBridge(enabled=False)
+    active_navigation = _sample_ai_decision()
+    queued_navigation = GuidanceDecision(
+        code="OBJECT_AHEAD",
+        message="Chair ahead",
+        priority=PRIORITY["OBJECT_AHEAD"],
+        risk_level="warning",
+        source="ai",
+    )
+
+    try:
+        _expect("active navigation accepted", voice.speak_decision(active_navigation), True)
+        _expect(
+            "active navigation starts",
+            _wait_until(lambda: voice._active_process is not None),
+            True,
+        )
+        active_process = voice._active_process
+        assert active_process is not None
+        _expect("routine navigation queues", voice.speak_decision(queued_navigation), True)
+
+        requested = parser._parse_line(b"SOS_REQUESTED\n")
+        assert requested is not None
+        _expect("emergency speech is accepted", voice.speak_decision(requested), True)
+        _expect(
+            "emergency interrupts active navigation",
+            _wait_until(lambda: active_process.poll() is not None),
+            True,
+        )
+        _expect(
+            "emergency begins speaking",
+            _wait_until(
+                lambda: "Sending emergency alert" in voice.started_messages
+            ),
+            True,
+        )
+
+        delivered = parser._parse_line(b"SOS_DELIVERED_WITH_LOCATION\n")
+        assert delivered is not None
+        _expect("final delivery queues", voice.speak_decision(delivered), True)
+        _expect(
+            "routine speech cannot replace queued delivery",
+            voice.speak_decision(queued_navigation),
+            False,
+        )
+        with voice._lock:
+            pending_codes = [decision.code for decision in voice._pending]
+        _expect(
+            "final delivery remains queued",
+            pending_codes,
+            ["SOS_DELIVERED_WITH_LOCATION"],
+        )
+        _expect(
+            "old queued navigation never starts",
+            "Chair ahead" in voice.started_messages,
+            False,
+        )
+    finally:
+        voice.stop()
+    print()
 
 
 def simulate_ai_decisions():
@@ -256,6 +567,7 @@ def simulate_runtime_events():
     print("AI pause and emergency pass-through")
     print("-----------------------------------")
     state = RuntimeState()
+    parser = UartBridge(enabled=False)
     pause = parser._parse_line(b"AI_PAUSE_ON\n")
     assert pause is not None
     state.apply_esp32_decision(pause)
@@ -267,11 +579,11 @@ def simulate_runtime_events():
         False,
     )
 
-    sos = parser._parse_line(b"SOS_SENT\n")
+    sos = parser._parse_line(b"SOS_REQUESTED\n")
     assert sos is not None
     state.apply_esp32_decision(sos)
     _expect("SOS speaks while AI paused", state.allows_esp32_decision(sos), True)
-    _expect("SOS message", sos.message, "Emergency alert sent")
+    _expect("SOS message", sos.message, "Sending emergency alert")
 
 
 def test_ai_pause_release_guards():
@@ -331,7 +643,13 @@ def test_ai_pause_release_guards():
     _expect("pause runtime message speaks", voice.spoken[-1].code, "AI_PAUSE_ON")
 
     for code in (
-        "SOS_SENT",
+        "SOS_HOLD_STARTED",
+        "SOS_CANCELLED",
+        "SOS_REQUESTED",
+        "SOS_DELIVERED_WITH_LOCATION",
+        "SOS_DELIVERED_WITHOUT_LOCATION",
+        "SOS_FAILED_NO_CONNECTION",
+        "SOS_DELIVERY_FAILED",
         "FALL_DETECTED",
         "HEAD_SENSOR_ALERT",
         "BATTERY_LOW",
@@ -446,6 +764,10 @@ def test_voice_cancel_current_and_pending():
 
 
 def main():
+    test_sos_uart_mapping_and_deprecated_events()
+    test_sos_acceptance_sequences()
+    test_sos_duplicate_suppression_windows()
+    test_emergency_voice_priority()
     simulate_ai_decisions()
     simulate_runtime_events()
     test_ai_pause_release_guards()

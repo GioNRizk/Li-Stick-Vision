@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 from typing import Any
 
 import config
@@ -11,9 +12,27 @@ from decision_engine import GuidanceDecision, PRIORITY
 ESP32_MESSAGES = {
     "CANE_ON": ("Cane is on", PRIORITY["CANE_ON"]),
 
-    "SOS_HOLD_STARTED": ("Hold to send emergency alert", PRIORITY["SOS_SENT"]),
+    "SOS_HOLD_STARTED": ("Hold for emergency", PRIORITY["SOS_HOLD_STARTED"]),
+    "SOS_CANCELLED": ("Emergency cancelled", PRIORITY["SOS_CANCELLED"]),
+    "SOS_REQUESTED": ("Sending emergency alert", PRIORITY["SOS_REQUESTED"]),
+    "SOS_DELIVERED_WITH_LOCATION": (
+        "Emergency alert sent with location",
+        PRIORITY["SOS_DELIVERED_WITH_LOCATION"],
+    ),
+    "SOS_DELIVERED_WITHOUT_LOCATION": (
+        "Emergency alert sent. Location unavailable",
+        PRIORITY["SOS_DELIVERED_WITHOUT_LOCATION"],
+    ),
+    "SOS_FAILED_NO_CONNECTION": (
+        "No connection. Retrying emergency alert",
+        PRIORITY["SOS_FAILED_NO_CONNECTION"],
+    ),
+    "SOS_DELIVERY_FAILED": (
+        "Emergency delivery failed. Retrying",
+        PRIORITY["SOS_DELIVERY_FAILED"],
+    ),
+    # Temporary compatibility for older ESP32 firmware.
     "SOS_SENT": ("Emergency alert sent", PRIORITY["SOS_SENT"]),
-    "SOS_CANCELLED": ("Emergency alert cancelled", PRIORITY["MODE_CHANGE"]),
 
     "FALL_DETECTED": ("Fall detected", PRIORITY["FALL_DETECTED"]),
 
@@ -28,14 +47,17 @@ ESP32_MESSAGES = {
     "AI_PAUSE_ON": ("AI guidance paused", PRIORITY["MODE_CHANGE"]),
     "AI_PAUSE_OFF": ("AI guidance resumed", PRIORITY["MODE_CHANGE"]),
 
-    "GPS_WEAK": ("GPS unavailable", PRIORITY["GPS_WEAK"]),
-    "GPS_AVAILABLE": ("GPS available", PRIORITY["GPS_AVAILABLE"]),
-
-    "WIFI_LOST": ("Connection lost", PRIORITY["WIFI_LOST"]),
-    "WIFI_CONNECTED": ("Connection restored", PRIORITY["WIFI_CONNECTED"]),
-
     "BATTERY_LOW": ("Battery low", PRIORITY["BATTERY_LOW"]),
 }
+
+SOS_DUPLICATE_SUPPRESSION_SECONDS = {
+    "SOS_REQUESTED": 3.0,
+    "SOS_DELIVERED_WITH_LOCATION": 10.0,
+    "SOS_DELIVERED_WITHOUT_LOCATION": 10.0,
+    "SOS_FAILED_NO_CONNECTION": 10.0,
+    "SOS_DELIVERY_FAILED": 10.0,
+}
+
 
 class UartBridge:
     """
@@ -51,6 +73,7 @@ class UartBridge:
         enabled: bool = True,
         port: str = config.UART_PORT,
         baudrate: int = config.UART_BAUDRATE,
+        clock: Callable[[], float] = time.monotonic,
     ):
         self.enabled = enabled
         self.port = port
@@ -58,6 +81,8 @@ class UartBridge:
         self._serial: Any | None = None
         self._last_sent_code: str | None = None
         self._last_send_time = 0.0
+        self._clock = clock
+        self._last_received_at: dict[str, float] = {}
 
         if not self.enabled:
             print("[UART] Disabled.")
@@ -110,7 +135,7 @@ class UartBridge:
         ):
             return False
 
-        now = time.monotonic()
+        now = self._clock()
         changed = decision.code != self._last_sent_code
         interval_elapsed = now - self._last_send_time >= config.UART_SEND_INTERVAL_SECONDS
         if not changed and not interval_elapsed:
@@ -146,10 +171,22 @@ class UartBridge:
             return None
 
         code = self._extract_code(text)
+        print(f"\n[UART] Event received: {code or text}")
         if code not in ESP32_MESSAGES:
-            if config.ENABLE_DEBUG_LOGGING:
-                print(f"\n[UART] Ignored message: {text}")
+            print(f"[UART] Unknown message ignored: {text}")
             return None
+
+        now = self._clock()
+        suppression_seconds = SOS_DUPLICATE_SUPPRESSION_SECONDS.get(code, 0.0)
+        last_received = self._last_received_at.get(code)
+        if (
+            suppression_seconds > 0.0
+            and last_received is not None
+            and now - last_received < suppression_seconds
+        ):
+            print(f"[UART] Duplicate suppressed: {code}")
+            return None
+        self._last_received_at[code] = now
 
         message, priority = ESP32_MESSAGES[code]
         return GuidanceDecision(

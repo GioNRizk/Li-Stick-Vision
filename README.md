@@ -45,7 +45,7 @@ The decision engine uses left, center, and right zones:
 Priority order:
 
 1. `FALL_DETECTED`
-2. `SOS_SENT`
+2. SOS request, delivery, failure, cancellation, and hold events
 3. `HEAD_SENSOR_ALERT`
 4. `BATTERY_LOW` / `AI_UNAVAILABLE`
 5. Runtime mode changes
@@ -58,8 +58,20 @@ Priority order:
 12. `OBJECT_AHEAD`
 13. `INFO` / `AI_READY` / `SAFE` silence
 
-ESP32 events such as `GPS_WEAK`, `GPS_AVAILABLE`, `WIFI_LOST`, and
-`WIFI_CONNECTED` are supported as status messages.
+SOS UART speech mappings:
+
+| ESP32 event | Pi speech |
+|---|---|
+| `SOS_HOLD_STARTED` | Hold for emergency |
+| `SOS_CANCELLED` | Emergency cancelled |
+| `SOS_REQUESTED` | Sending emergency alert |
+| `SOS_DELIVERED_WITH_LOCATION` | Emergency alert sent with location |
+| `SOS_DELIVERED_WITHOUT_LOCATION` | Emergency alert sent. Location unavailable |
+| `SOS_FAILED_NO_CONNECTION` | No connection. Retrying emergency alert |
+| `SOS_DELIVERY_FAILED` | Emergency delivery failed. Retrying |
+
+`SOS_SENT` remains a temporary compatibility alias for older firmware. GPS and
+Wi-Fi state changes have no speech mappings and are ignored safely.
 
 Vehicle context uses existing YOLOv8 COCO classes: `bicycle`, `motorcycle`,
 `car`, `bus`, and `truck`. Nearby vehicles are announced as `Vehicle nearby`;
@@ -85,9 +97,13 @@ ESP32 mode events control Raspberry Pi voice behavior at runtime:
 | `FULL_PAUSE_OFF` | Cane resumed | Allows AI speech if AI pause/silent mode are off |
 
 These safety ESP32 messages still speak during AI pause, silent mode, or full
-pause: `FALL_DETECTED`, `SOS_SENT`, `HEAD_SENSOR_ALERT`, and `BATTERY_LOW`.
+pause: `FALL_DETECTED`, all SOS events, `HEAD_SENSOR_ALERT`, and `BATTERY_LOW`.
 `HEAD_SENSOR_ALERT` speaks `Head obstacle`, can override normal AI guidance, and
 uses the emergency speech cooldown so repeated sensor events do not spam speech.
+
+SOS request events are duplicate-suppressed for 3 seconds. SOS delivery and
+failure events are duplicate-suppressed independently for 10 seconds, so a
+successful delivery is still announced after an earlier failure.
 
 `RuntimeState` also keeps lightweight sensor-fusion readiness fields:
 `last_esp32_event`, `last_safety_event_time`, and
@@ -104,9 +120,10 @@ You can test runtime state handling without hardware:
 python test_runtime_events.py
 ```
 
-The simulation covers startup status, vehicle/stairs/pole placeholder labels,
-`HEAD_SENSOR_ALERT`, AI pause suppression, and SOS pass-through while AI is
-paused.
+The simulation covers all SOS UART acceptance sequences, duplicate suppression,
+emergency speech priority, startup status, vehicle/stairs/pole placeholder
+labels, `HEAD_SENSOR_ALERT`, and SOS pass-through during AI pause, silent mode,
+and full pause.
 
 ## Hardware Responsibilities
 
